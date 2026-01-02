@@ -33,11 +33,13 @@ export function convertGoogleToAnthropic(googleResponse, model) {
             if (part.thought === true) {
                 const signature = part.thoughtSignature || '';
 
-                // Include thinking blocks in the response for Claude Code
+                // For Gemini models: always include thinking blocks
+                // Even if signature is empty/short, Cursor needs them to avoid loops
+                // Gemini thinking blocks are critical for preventing agent model looping
                 anthropicContent.push({
                     type: 'thinking',
                     thinking: part.text,
-                    signature: signature
+                    signature: signature || 'gemini-thinking-no-signature'
                 });
             } else {
                 anthropicContent.push({

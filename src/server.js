@@ -7,9 +7,11 @@
 import express from 'express';
 import cors from 'cors';
 import crypto from 'crypto';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { dirname } from 'path';
 import { sendMessage, sendMessageStream, listModels, getModelQuotas } from './cloudcode-client.js';
 import { forceRefresh } from './token-extractor.js';
-import { REQUEST_BODY_LIMIT, API_KEY } from './constants.js';
+import { REQUEST_BODY_LIMIT, API_KEY, API_KEY_PATH } from './constants.js';
 import { AccountManager } from './account-manager.js';
 import { formatDuration, estimateTokenCount } from './utils/helpers.js';
 import { convertOpenAIToAnthropic, convertAnthropicToOpenAI, convertAnthropicStreamToOpenAI } from './format/openai-converter.js';
@@ -31,24 +33,90 @@ const app = express();
 // Initialize account manager (will be fully initialized on first request or startup)
 const accountManager = new AccountManager();
 
-// Generate or use API key
-let serverApiKey = API_KEY;
-if (!serverApiKey) {
-    // Generate a random API key if not provided
-    serverApiKey = 'ag_' + crypto.randomBytes(32).toString('hex');
+/**
+ * Load API key from file or generate new one
+ */
+function loadOrGenerateApiKey() {
+    // First priority: environment variable
+    if (API_KEY) {
+        console.log('[Server] Using API key from environment variable');
+        return API_KEY;
+    }
+    
+    // Second priority: load from file
+    if (existsSync(API_KEY_PATH)) {
+        try {
+            const savedKey = readFileSync(API_KEY_PATH, 'utf8').trim();
+            if (savedKey && savedKey.startsWith('ag_')) {
+                console.log('[Server] Loaded API key from file');
+                return savedKey;
+            }
+        } catch (error) {
+            console.error('[Server] Failed to read API key file:', error.message);
+        }
+    }
+    
+    // Generate new key and save it
+    const newKey = 'ag_' + crypto.randomBytes(32).toString('hex');
+    
+    try {
+        // Ensure directory exists
+        const dir = dirname(API_KEY_PATH);
+        if (!existsSync(dir)) {
+            mkdirSync(dir, { recursive: true });
+        }
+        
+        // Save to file
+        writeFileSync(API_KEY_PATH, newKey, 'utf8');
+        console.log(`[Server] Generated and saved new API key to: ${API_KEY_PATH}`);
+    } catch (error) {
+        console.error('[Server] Failed to save API key to file:', error.message);
+    }
+    
     console.log(`
 ╔══════════════════════════════════════════════════════════════╗
-║  🔑 API Key Generated (save this for Cursor configuration) ║
+║  🔑 API Key Generated (saved to config file)                ║
 ╠══════════════════════════════════════════════════════════════╣
 ║                                                              ║
-║  ${serverApiKey}
+║  ${newKey}
+║                                                              ║
+║  This key is saved to: ${API_KEY_PATH.slice(-40)}
 ║                                                              ║
 ║  To use a custom key, set ANTIGRAVITY_PROXY_API_KEY         ║
-║  environment variable before starting the server.           ║
+║  environment variable or regenerate from dashboard.         ║
 ║                                                              ║
 ╚══════════════════════════════════════════════════════════════╝
     `);
+    
+    return newKey;
 }
+
+/**
+ * Regenerate API key and save to file
+ */
+function regenerateApiKey() {
+    const newKey = 'ag_' + crypto.randomBytes(32).toString('hex');
+    
+    try {
+        // Ensure directory exists
+        const dir = dirname(API_KEY_PATH);
+        if (!existsSync(dir)) {
+            mkdirSync(dir, { recursive: true });
+        }
+        
+        // Save to file
+        writeFileSync(API_KEY_PATH, newKey, 'utf8');
+        console.log('[Server] Regenerated and saved new API key');
+    } catch (error) {
+        console.error('[Server] Failed to save new API key:', error.message);
+        throw error;
+    }
+    
+    return newKey;
+}
+
+// Generate or use API key
+let serverApiKey = loadOrGenerateApiKey();
 
 // Track initialization status
 let isInitialized = false;
@@ -158,6 +226,50 @@ function authenticateApiKey(req, res, next) {
 
 // Apply authentication middleware to all routes except health
 app.use(authenticateApiKey);
+
+/**
+ * Debug helper: Log response content for loop detection
+ */
+function logResponseForDebug(response, model) {
+    if (!response || !response.content) return;
+    
+    const contentTypes = response.content.map(block => {
+        if (block.type === 'thinking') {
+            const hasSignature = block.signature && block.signature !== 'gemini-thinking-no-signature';
+            return `thinking(sig:${hasSignature ? 'yes' : 'no'})`;
+        }
+        if (block.type === 'tool_use') {
+            return `tool_use(${block.name})`;
+        }
+        if (block.type === 'text') {
+            const preview = (block.text || '').slice(0, 50).replace(/\n/g, ' ');
+            return `text("${preview}${block.text.length > 50 ? '...' : ''}")`;
+        }
+        return block.type || 'unknown';
+    });
+    
+    console.log(`[Server] Response for ${model}: [${contentTypes.join(', ')}]`);
+    
+    // Check for potential loop indicators
+    const hasThinking = response.content.some(b => b.type === 'thinking');
+    const hasToolUse = response.content.some(b => b.type === 'tool_use');
+    const hasText = response.content.some(b => b.type === 'text');
+    const thinkingWithoutSignature = response.content.filter(b => 
+        b.type === 'thinking' && (!b.signature || b.signature === 'gemini-thinking-no-signature')
+    ).length;
+    
+    if (hasToolUse && !hasThinking && model.includes('gemini')) {
+        console.log(`[Server] ⚠️ WARNING: Gemini tool_use without thinking block - potential loop risk!`);
+    }
+    
+    if (thinkingWithoutSignature > 0) {
+        console.log(`[Server] ⚠️ WARNING: ${thinkingWithoutSignature} thinking block(s) without valid signature`);
+    }
+    
+    if (!hasText && !hasToolUse && hasThinking) {
+        console.log(`[Server] ⚠️ WARNING: Response has only thinking blocks - might cause loop`);
+    }
+}
 
 /**
  * Parse error message to extract error type, status code, and user-friendly message
@@ -820,6 +932,27 @@ app.post('/refresh-token', async (req, res) => {
 });
 
 /**
+ * Regenerate API key endpoint
+ */
+app.post('/api/regenerate-api-key', (req, res) => {
+    try {
+        const newKey = regenerateApiKey();
+        serverApiKey = newKey; // Update in-memory key
+        
+        res.json({
+            status: 'success',
+            message: 'API key regenerated successfully',
+            apiKey: newKey
+        });
+    } catch (error) {
+        res.status(500).json({
+            status: 'error',
+            message: error.message
+        });
+    }
+});
+
+/**
  * List models endpoint (OpenAI-compatible format)
  */
 app.get('/v1/models', async (req, res) => {
@@ -1000,6 +1133,10 @@ app.post('/v1/messages', async (req, res) => {
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0
                 };
+                
+                // Track content blocks for debugging
+                const contentBlocks = [];
+                let currentBlockIndex = -1;
 
                 // Use the streaming generator with account manager
                 for await (const event of sendMessageStream(request, accountManager)) {
@@ -1016,8 +1153,70 @@ app.post('/v1/messages', async (req, res) => {
                     if (event.type === 'message_delta' && event.usage) {
                         streamUsage.output_tokens = event.usage.output_tokens || 0;
                     }
+                    
+                    // Track content blocks for debugging
+                    if (event.type === 'content_block_start') {
+                        currentBlockIndex = event.index;
+                        contentBlocks[currentBlockIndex] = {
+                            type: event.content_block?.type,
+                            name: event.content_block?.name,
+                            hasSignature: false,
+                            text: ''
+                        };
+                        
+                        // Check for thinking signature
+                        if (event.content_block?.type === 'thinking' && event.content_block?.signature) {
+                            contentBlocks[currentBlockIndex].hasSignature = 
+                                event.content_block.signature !== 'gemini-thinking-no-signature';
+                        }
+                    }
+                    
+                    if (event.type === 'content_block_delta' && currentBlockIndex >= 0) {
+                        if (event.delta?.text) {
+                            contentBlocks[currentBlockIndex].text += event.delta.text;
+                        }
+                    }
                 }
                 res.end();
+                
+                // Debug log the streamed content
+                if (contentBlocks.length > 0) {
+                    const contentSummary = contentBlocks.map((block, i) => {
+                        if (block.type === 'thinking') {
+                            return `thinking(sig:${block.hasSignature ? 'yes' : 'no'})`;
+                        }
+                        if (block.type === 'tool_use') {
+                            return `tool_use(${block.name || 'unknown'})`;
+                        }
+                        if (block.type === 'text') {
+                            const preview = block.text.slice(0, 50).replace(/\n/g, ' ');
+                            return `text("${preview}${block.text.length > 50 ? '...' : ''}")`;
+                        }
+                        return block.type || 'unknown';
+                    });
+                    
+                    console.log(`[Server] Streamed response for ${request.model}: [${contentSummary.join(', ')}]`);
+                    
+                    // Check for loop indicators
+                    const hasThinking = contentBlocks.some(b => b.type === 'thinking');
+                    const hasToolUse = contentBlocks.some(b => b.type === 'tool_use');
+                    const hasText = contentBlocks.some(b => b.type === 'text');
+                    const thinkingWithoutSig = contentBlocks.filter(b => 
+                        b.type === 'thinking' && !b.hasSignature
+                    ).length;
+                    
+                    if (hasToolUse && !hasThinking && request.model.includes('gemini')) {
+                        console.log(`[Server] ⚠️ WARNING: Gemini tool_use without thinking - LOOP RISK!`);
+                    }
+                    
+                    if (thinkingWithoutSig > 0) {
+                        console.log(`[Server] ⚠️ WARNING: ${thinkingWithoutSig} thinking block(s) without valid signature`);
+                    }
+                    
+                    if (!hasText && !hasToolUse && hasThinking) {
+                        console.log(`[Server] ⚠️ WARNING: Only thinking blocks, no text/tools - might cause loop`);
+                    }
+                }
                 
                 // Track successful streaming request with token usage
                 const duration = Date.now() - requestStartTime;
@@ -1063,6 +1262,10 @@ app.post('/v1/messages', async (req, res) => {
         } else {
             // Handle non-streaming response
             const response = await sendMessage(request, accountManager);
+            
+            // Debug log the response
+            logResponseForDebug(response, request.model);
+            
             res.json(response);
             
             // Track successful non-streaming request with token usage

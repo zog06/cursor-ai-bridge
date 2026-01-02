@@ -23,6 +23,8 @@ export function ApiConfigCard({ apiKey, ngrokUrl }: ApiConfigCardProps) {
   const [openAISettings, setOpenAISettings] = useState<OpenAISettings | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [regenerating, setRegenerating] = useState(false);
+  const [currentApiKey, setCurrentApiKey] = useState(apiKey);
 
   const fetchCursorSettings = async () => {
     setLoading(true);
@@ -112,7 +114,7 @@ export function ApiConfigCard({ apiKey, ngrokUrl }: ApiConfigCardProps) {
         fetch("/api/cursor/openai/api-key", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ apiKey, enabled: true }),
+                    body: JSON.stringify({ apiKey: currentApiKey, enabled: true }),
         }),
         fetch("/api/cursor/openai/base-url", {
           method: "POST",
@@ -149,7 +151,7 @@ export function ApiConfigCard({ apiKey, ngrokUrl }: ApiConfigCardProps) {
       const response = await fetch("/api/cursor/openai/api-key", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey, enabled: true }),
+        body: JSON.stringify({ apiKey: currentApiKey, enabled: true }),
       });
       const result = await response.json();
       if (result.status === "success") {
@@ -163,6 +165,36 @@ export function ApiConfigCard({ apiKey, ngrokUrl }: ApiConfigCardProps) {
       alert("An error occurred while updating API Key.");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleRegenerateApiKey = async () => {
+    const confirmed = window.confirm(
+      "⚠️ Regenerate API Key\n\n" +
+      "This will generate a new API key and invalidate the old one.\n" +
+      "You'll need to update Cursor IDE settings with the new key.\n\n" +
+      "Do you want to continue?"
+    );
+    
+    if (!confirmed) return;
+
+    setRegenerating(true);
+    try {
+      const response = await fetch("/api/regenerate-api-key", {
+        method: "POST",
+      });
+      const result = await response.json();
+      if (result.status === "success") {
+        setCurrentApiKey(result.apiKey);
+        alert("✅ API Key regenerated!\n\nNew key: " + result.apiKey.substring(0, 20) + "...\n\nPlease update your Cursor IDE settings.");
+      } else {
+        alert("Failed to regenerate API key: " + result.message);
+      }
+    } catch (error) {
+      console.error("Failed to regenerate API key:", error);
+      alert("An error occurred while regenerating API key.");
+    } finally {
+      setRegenerating(false);
     }
   };
 
@@ -213,12 +245,34 @@ export function ApiConfigCard({ apiKey, ngrokUrl }: ApiConfigCardProps) {
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
-        <SecretField value={apiKey} />
+        {/* Proxy API Key - More prominent */}
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold">Proxy API Key</h3>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleRegenerateApiKey}
+              disabled={regenerating}
+              className="h-7 text-xs"
+            >
+              <RefreshCw className={`h-3 w-3 mr-1 ${regenerating ? "animate-spin" : ""}`} />
+              Regenerate
+            </Button>
+          </div>
+          <SecretField value={currentApiKey} />
+          <p className="text-xs text-muted-foreground">
+            Use this key to authenticate requests to the proxy server
+          </p>
+        </div>
         
         {ngrokUrl && (
-          <div className="pt-2 border-t border-border/40">
-            <p className="text-xs text-muted-foreground mb-2">Public Endpoint</p>
+          <div className="pt-3 border-t border-border/40 space-y-3">
+            <h3 className="text-sm font-semibold">Public Endpoint</h3>
             <SecretField value={ngrokUrl} size="sm" />
+            <p className="text-xs text-muted-foreground">
+              Use this URL as Base URL in Cursor IDE
+            </p>
           </div>
         )}
 
@@ -251,8 +305,10 @@ export function ApiConfigCard({ apiKey, ngrokUrl }: ApiConfigCardProps) {
                       ? `${openAISettings.apiKey.substring(0, 5)}${'*'.repeat(Math.max(0, openAISettings.apiKey.length - 5))}`
                       : "Not configured"}
                   </p>
-                  <p className="text-xs text-muted-foreground truncate">
-                    Base URL: {openAISettings.baseUrl || "Not configured"}
+                  <p className="text-xs text-muted-foreground">
+                    Base URL: {openAISettings.baseUrl 
+                      ? `${openAISettings.baseUrl.substring(0, 11)}${'*'.repeat(Math.max(0, openAISettings.baseUrl.length - 11))}`
+                      : "Not configured"}
                   </p>
                 </div>
               </div>

@@ -70,6 +70,12 @@ export const ACCOUNT_CONFIG_PATH = join(
     '.config/antigravity-proxy/accounts.json'
 );
 
+// API key storage path
+export const API_KEY_PATH = join(
+    homedir(),
+    '.config/antigravity-proxy/api-key.txt'
+);
+
 // Antigravity app database path (for legacy single-account token extraction)
 // Uses platform-specific path detection
 export const ANTIGRAVITY_DB_PATH = getAntigravityDbPath();
@@ -183,6 +189,7 @@ export default {
     ANTIGRAVITY_AUTH_PORT,
     DEFAULT_PORT,
     ACCOUNT_CONFIG_PATH,
+    API_KEY_PATH,
     ANTIGRAVITY_DB_PATH,
     DEFAULT_COOLDOWN_MS,
     MAX_RETRIES,
