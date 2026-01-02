@@ -346,6 +346,11 @@ export async function sendMessage(anthropicRequest, accountManager) {
                         const errorText = await response.text();
                         const shortError = errorText.length > 200 ? errorText.substring(0, 200) + '...' : errorText;
                         console.log(`[CloudCode] Error at ${endpoint}: ${response.status} - ${shortError}`);
+                        
+                        // Log full error for invalid tool/argument errors
+                        if (errorText.includes('invalid') && (errorText.includes('tool') || errorText.includes('argument'))) {
+                            console.log(`[CloudCode] FULL ERROR TEXT (invalid tool/argument): ${errorText}`);
+                        }
 
                         if (response.status === 401) {
                             // Auth error - clear caches and retry with fresh token
@@ -612,7 +617,15 @@ export async function* sendMessageStream(anthropicRequest, accountManager) {
 
                     if (!response.ok) {
                         const errorText = await response.text();
-                        console.log(`[CloudCode] Stream error at ${endpoint}: ${response.status} - ${errorText}`);
+                        const shortError = errorText.length > 200 ? errorText.substring(0, 200) + '...' : errorText;
+                        console.log(`[CloudCode] Stream error at ${endpoint}: ${response.status} - ${shortError}`);
+                        
+                        // Log full error for invalid tool/argument errors
+                        if (errorText.includes('invalid') && (errorText.includes('tool') || errorText.includes('argument') || errorText.includes('call'))) {
+                            console.log(`[CloudCode] FULL STREAM ERROR TEXT (invalid tool/argument): ${errorText}`);
+                            // Also log the request payload for debugging
+                            console.log(`[CloudCode] Request payload tools: ${JSON.stringify(payload.request?.tools || 'none').substring(0, 500)}`);
+                        }
 
                         if (response.status === 401) {
                             // Auth error - clear caches and retry

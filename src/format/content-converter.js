@@ -86,8 +86,16 @@ export function convertContentToParts(content, isClaudeModel = false, isGeminiMo
                 args: block.input || {}
             };
 
+            // Log tool_use conversion for debugging
+            const argsKeys = Object.keys(functionCall.args);
+            const argsPreview = argsKeys.length > 0 
+                ? argsKeys.map(k => `${k}=${JSON.stringify(functionCall.args[k]).substring(0, 50)}`).join(', ')
+                : '{}';
+            console.log(`[ContentConverter] Converting tool_use: name="${block.name}", id="${block.id || 'none'}", args_keys=[${argsKeys.join(', ')}], args_preview={${argsPreview}}`);
+
             if (isClaudeModel && block.id) {
                 functionCall.id = block.id;
+                console.log(`[ContentConverter] Added id field for Claude model: ${block.id}`);
             }
 
             // Build the part with functionCall
@@ -138,11 +146,30 @@ export function convertContentToParts(content, isClaudeModel = false, isGeminiMo
                 responseContent = { result: texts || (imageParts.length > 0 ? 'Image attached' : '') };
             }
 
-            // Find tool name from tool_use_id mapping
-            // Google API requires functionResponse.name to be the tool name, not the ID
-            const toolName = block.tool_use_id 
-                ? (toolUseIdToNameMap.get(block.tool_use_id) || block.tool_use_id)
-                : 'unknown';
+            // Find tool name from multiple sources (priority order):
+            // 1. block.name (if provided directly in tool_result)
+            // 2. toolUseIdToNameMap lookup (from previous tool_use blocks)
+            // 3. Skip if not found (invalid tool_result without matching tool_use)
+            let toolName = block.name; // Some APIs include name directly
+            let nameSource = 'block.name';
+            
+            if (!toolName && block.tool_use_id) {
+                toolName = toolUseIdToNameMap.get(block.tool_use_id);
+                nameSource = toolName ? 'toolUseIdToNameMap' : 'not found';
+            }
+
+            // If we still don't have a tool name, this is an invalid tool_result
+            // Google API requires a valid tool name, so we must skip this block
+            if (!toolName) {
+                console.log(`[ContentConverter] WARNING: tool_result without valid tool name (tool_use_id: ${block.tool_use_id || 'none'}, name source: ${nameSource}). Skipping to avoid "invalid tool call use" error.`);
+                console.log(`[ContentConverter] Available tool_use_ids in map: ${Array.from(toolUseIdToNameMap.keys()).join(', ') || 'none'}`);
+                // Skip this tool_result - it's invalid without a matching tool_use
+                continue;
+            }
+
+            if (process.env.DEBUG) {
+                console.log(`[ContentConverter] tool_result conversion: tool_use_id=${block.tool_use_id}, tool_name=${toolName}, name_source=${nameSource}`);
+            }
 
             const functionResponse = {
                 name: toolName,
@@ -152,6 +179,9 @@ export function convertContentToParts(content, isClaudeModel = false, isGeminiMo
             // For Claude models, the id field must match the tool_use_id
             if (isClaudeModel && block.tool_use_id) {
                 functionResponse.id = block.tool_use_id;
+                if (process.env.DEBUG) {
+                    console.log(`[ContentConverter] Added id field for Claude model: ${block.tool_use_id}`);
+                }
             }
 
             parts.push({ functionResponse });

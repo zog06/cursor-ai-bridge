@@ -482,6 +482,94 @@ function flattenTypeArrays(schema, nullableProps = null, currentPropName = null)
 }
 
 /**
+ * Sanitize JSON Schema for Claude models (minimal sanitization).
+ * Preserves most JSON Schema features to avoid "invalid arguments" errors.
+ * Only removes truly problematic fields like $ref, $defs, etc.
+ * 
+ * @param {Object} schema - Schema to sanitize
+ * @returns {Object} Minimally sanitized schema
+ */
+export function sanitizeSchemaForClaude(schema) {
+    if (!schema || typeof schema !== 'object') {
+        // Empty/missing schema - generate placeholder
+        console.log('[SchemaSanitizer] Empty schema detected, generating placeholder');
+        return {
+            type: 'object',
+            properties: {
+                reason: {
+                    type: 'string',
+                    description: 'Reason for calling this tool'
+                }
+            },
+            required: ['reason']
+        };
+    }
+
+    // Only remove truly problematic fields that cause API errors
+    const PROBLEMATIC_FIELDS = new Set([
+        '$ref', '$defs', '$id', '$schema', '$comment', 'definitions'
+    ]);
+
+    const sanitized = { ...schema };
+    const removedFields = [];
+
+    // Remove problematic top-level fields
+    for (const key of PROBLEMATIC_FIELDS) {
+        if (key in sanitized) {
+            removedFields.push(key);
+            delete sanitized[key];
+        }
+    }
+    
+    if (removedFields.length > 0 && process.env.DEBUG) {
+        console.log(`[SchemaSanitizer] Removed problematic fields: ${removedFields.join(', ')}`);
+    }
+
+    // Recursively process properties
+    if (sanitized.properties && typeof sanitized.properties === 'object') {
+        const newProps = {};
+        for (const [propKey, propValue] of Object.entries(sanitized.properties)) {
+            newProps[propKey] = sanitizeSchemaForClaude(propValue);
+        }
+        sanitized.properties = newProps;
+    }
+
+    // Recursively process items
+    if (sanitized.items) {
+        if (Array.isArray(sanitized.items)) {
+            sanitized.items = sanitized.items.map(item => sanitizeSchemaForClaude(item));
+        } else if (typeof sanitized.items === 'object') {
+            sanitized.items = sanitizeSchemaForClaude(sanitized.items);
+        }
+    }
+
+    // Recursively process allOf/anyOf/oneOf
+    for (const key of ['allOf', 'anyOf', 'oneOf']) {
+        if (Array.isArray(sanitized[key])) {
+            sanitized[key] = sanitized[key].map(item => sanitizeSchemaForClaude(item));
+        }
+    }
+
+    // Ensure we have at least a type
+    if (!sanitized.type) {
+        sanitized.type = 'object';
+    }
+
+    // If object type with no properties, add placeholder
+    if (sanitized.type === 'object' && (!sanitized.properties || Object.keys(sanitized.properties).length === 0)) {
+        sanitized.properties = {
+            reason: {
+                type: 'string',
+                description: 'Reason for calling this tool'
+            }
+        };
+        sanitized.required = ['reason'];
+    }
+
+    return sanitized;
+}
+
+/**
  * Sanitize JSON Schema for Antigravity API compatibility.
  * Uses allowlist approach - only permit known-safe JSON Schema features.
  * Converts "const" to equivalent "enum" for compatibility.

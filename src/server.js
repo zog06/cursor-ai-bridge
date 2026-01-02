@@ -1087,13 +1087,13 @@ app.post('/v1/messages', async (req, res) => {
         };
 
         // Get tool metadata from request conversion
-        // This will give us the FILTERED tool count and tokens
+        // DEPRECATED: Tool filtering is disabled. This now returns all tools without filtering.
         const { toolMetadata } = await import('./format/request-converter.js').then(m => {
             const result = m.convertAnthropicToGoogle(request);
             return result;
         });
         
-        // Override toolInfo with filtered data if available
+        // Override toolInfo with tool metadata if available (deprecated - no filtering applied)
         if (toolMetadata) {
             toolInfo = {
                 count: toolMetadata.filteredCount,
@@ -1407,13 +1407,13 @@ app.post('/chat/completions', async (req, res) => {
         const anthropicRequest = convertOpenAIToAnthropic(openaiRequest);
         
         // Get tool metadata from request conversion
-        // This will give us the FILTERED tool count and tokens
+        // DEPRECATED: Tool filtering is disabled. This now returns all tools without filtering.
         const { toolMetadata } = await import('./format/request-converter.js').then(m => {
             const result = m.convertAnthropicToGoogle(anthropicRequest);
             return result;
         });
         
-        // Override toolInfo with filtered data if available
+        // Override toolInfo with tool metadata if available (deprecated - no filtering applied)
         if (toolMetadata) {
             toolInfo = {
                 count: toolMetadata.filteredCount,
