@@ -16,6 +16,7 @@ import {
     MAX_RETRIES,
     MAX_WAIT_BEFORE_ERROR_MS,
     MIN_SIGNATURE_LENGTH,
+    normalizeModelName,
     getModelFamily,
     isThinkingModel
 } from './constants.js';
@@ -206,8 +207,12 @@ function parseResetTime(responseOrError, errorText = '') {
  * Build the wrapped request body for Cloud Code API
  */
 function buildCloudCodeRequest(anthropicRequest, projectId) {
-    const model = anthropicRequest.model;
-    const { googleRequest, toolMetadata } = convertAnthropicToGoogle(anthropicRequest);
+    // Normalize model name (strip "antigravity-" prefix if present)
+    const model = normalizeModelName(anthropicRequest.model);
+    const { googleRequest, toolMetadata } = convertAnthropicToGoogle({
+        ...anthropicRequest,
+        model // Use normalized model name
+    });
 
     // Use stable session ID derived from first user message for cache continuity
     googleRequest.sessionId = deriveSessionId(anthropicRequest);
@@ -262,7 +267,7 @@ function buildHeaders(token, model, accept = 'application/json') {
  * @throws {Error} If max retries exceeded or no accounts available
  */
 export async function sendMessage(anthropicRequest, accountManager) {
-    const model = anthropicRequest.model;
+    const model = normalizeModelName(anthropicRequest.model);
     const isThinking = isThinkingModel(model);
 
     // Retry loop with account failover
@@ -533,7 +538,7 @@ async function parseThinkingSSEResponse(response, originalModel) {
  * @throws {Error} If max retries exceeded or no accounts available
  */
 export async function* sendMessageStream(anthropicRequest, accountManager) {
-    const model = anthropicRequest.model;
+    const model = normalizeModelName(anthropicRequest.model);
 
     // Retry loop with account failover
     // Ensure we try at least as many times as there are accounts to cycle through everyone

@@ -6,14 +6,16 @@
 
 **Tested and Working Models:**
 
-| Model ID | Status | Description |
-|----------|--------|-------------|
-| `claude-sonnet-4-5-thinking` | ✅ Tested | Claude Sonnet 4.5 with extended thinking |
-| `claude-opus-4-5-thinking` | ✅ Tested | Claude Opus 4.5 with extended thinking |
-| `claude-sonnet-4-5` | ✅ Tested | Claude Sonnet 4.5 without thinking |
-| `gemini-3-flash` | ⚠️ Not Yet Tested | Gemini 3 Flash with thinking |
-| `gemini-3-pro-low` | ⚠️ Not Yet Tested | Gemini 3 Pro Low with thinking |
-| `gemini-3-pro-high` | ⚠️ Not Yet Tested | Gemini 3 Pro High with thinking |
+| Model ID | Cursor Model Name | Status |
+|----------|-------------------|--------|
+| `claude-sonnet-4-5-thinking` | `claude-sonnet-4-5-thinking` | ✅ Tested |
+| `claude-opus-4-5-thinking` | `claude-opus-4-5-thinking` | ✅ Tested |
+| `claude-sonnet-4-5` | `claude-sonnet-4-5` | ✅ Tested |
+| `gemini-3-flash` | `antigravity-gemini-3-flash` | ⚠️ Not Yet Tested |
+| `gemini-3-pro-low` | `antigravity-gemini-3-pro-low` | ⚠️ Not Yet Tested |
+| `gemini-3-pro-high` | `antigravity-gemini-3-pro-high` | ⚠️ Not Yet Tested |
+
+> **Cursor Compatibility:** Gemini models require the `antigravity-` prefix in Cursor IDE to avoid conflicts with built-in models. The proxy automatically strips this prefix.
 
 A local proxy server that exposes **Anthropic-compatible** and **OpenAI-compatible** APIs, allowing you to use Claude and Gemini models through **Cursor IDE** and other compatible tools. The proxy connects to Antigravity's Cloud Code API and provides seamless integration with Cursor IDE.
 
@@ -323,21 +325,21 @@ curl -H "x-api-key: YOUR_API_KEY" "http://localhost:8080/account-limits?format=t
 
 ### Claude Models
 
-| Model ID | Description |
-|----------|-------------|
-| `claude-sonnet-4-5-thinking` | Claude Sonnet 4.5 with extended thinking |
-| `claude-opus-4-5-thinking` | Claude Opus 4.5 with extended thinking |
-| `claude-sonnet-4-5` | Claude Sonnet 4.5 without thinking |
+| Model ID | Cursor Model Name |
+|----------|-------------------|
+| `claude-sonnet-4-5-thinking` | `claude-sonnet-4-5-thinking` |
+| `claude-opus-4-5-thinking` | `claude-opus-4-5-thinking` |
+| `claude-sonnet-4-5` | `claude-sonnet-4-5` |
 
 ### Gemini Models
 
-| Model ID | Description |
-|----------|-------------|
-| `gemini-3-flash` | Gemini 3 Flash with thinking |
-| `gemini-3-pro-low` | Gemini 3 Pro Low with thinking |
-| `gemini-3-pro-high` | Gemini 3 Pro High with thinking |
+| Model ID | Cursor Model Name |
+|----------|-------------------|
+| `gemini-3-flash` | `antigravity-gemini-3-flash` |
+| `gemini-3-pro-low` | `antigravity-gemini-3-pro-low` |
+| `gemini-3-pro-high` | `antigravity-gemini-3-pro-high` |
 
-Gemini models include full thinking support with `thoughtSignature` handling for multi-turn conversations.
+> **Note:** Cursor IDE has built-in Gemini models, so use the `antigravity-` prefix when adding Gemini models. The proxy automatically strips this prefix.
 
 ## API Endpoints
 

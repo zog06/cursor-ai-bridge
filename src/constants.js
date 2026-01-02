@@ -100,13 +100,36 @@ export const GEMINI_SKIP_SIGNATURE = 'skip_thought_signature_validator';
 // Cache TTL for Gemini thoughtSignatures (2 hours)
 export const GEMINI_SIGNATURE_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 
+// Model name prefix for Cursor compatibility
+// Cursor has built-in Gemini models, so we use "antigravity-" prefix to avoid conflicts
+// e.g., "antigravity-gemini-3-flash" -> "gemini-3-flash"
+export const MODEL_PREFIX = 'antigravity-';
+
+/**
+ * Normalize model name by stripping the antigravity- prefix if present.
+ * This allows users to add models like "antigravity-gemini-3-flash" in Cursor
+ * to avoid conflicts with Cursor's built-in Gemini models.
+ * @param {string} modelName - The model name from the request
+ * @returns {string} Normalized model name without prefix
+ */
+export function normalizeModelName(modelName) {
+    if (!modelName) return modelName;
+    const lower = modelName.toLowerCase();
+    if (lower.startsWith(MODEL_PREFIX)) {
+        return modelName.slice(MODEL_PREFIX.length);
+    }
+    return modelName;
+}
+
 /**
  * Get the model family from model name (dynamic detection, no hardcoded list).
+ * Automatically normalizes the model name first.
  * @param {string} modelName - The model name from the request
  * @returns {'claude' | 'gemini' | 'unknown'} The model family
  */
 export function getModelFamily(modelName) {
-    const lower = (modelName || '').toLowerCase();
+    const normalized = normalizeModelName(modelName);
+    const lower = (normalized || '').toLowerCase();
     if (lower.includes('claude')) return 'claude';
     if (lower.includes('gemini')) return 'gemini';
     return 'unknown';
@@ -114,11 +137,13 @@ export function getModelFamily(modelName) {
 
 /**
  * Check if a model supports thinking/reasoning output.
+ * Automatically normalizes the model name first.
  * @param {string} modelName - The model name from the request
  * @returns {boolean} True if the model supports thinking blocks
  */
 export function isThinkingModel(modelName) {
-    const lower = (modelName || '').toLowerCase();
+    const normalized = normalizeModelName(modelName);
+    const lower = (normalized || '').toLowerCase();
     // Claude thinking models have "thinking" in the name
     if (lower.includes('claude') && lower.includes('thinking')) return true;
     // Gemini thinking models: explicit "thinking" in name, OR gemini version 3+
@@ -167,7 +192,9 @@ export default {
     GEMINI_MAX_OUTPUT_TOKENS,
     GEMINI_SKIP_SIGNATURE,
     GEMINI_SIGNATURE_CACHE_TTL_MS,
+    MODEL_PREFIX,
     API_KEY,
+    normalizeModelName,
     getModelFamily,
     isThinkingModel,
     OAUTH_CONFIG,
