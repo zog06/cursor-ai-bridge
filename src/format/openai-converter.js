@@ -36,29 +36,93 @@ export function convertOpenAIToAnthropic(openaiRequest) {
             }
         } else if (msg.role === 'user' || msg.role === 'assistant') {
             // Convert OpenAI message to Anthropic format
-            let content = msg.content;
-            
-            // Handle array content (multimodal)
-            if (Array.isArray(content)) {
-                content = content.map(block => {
-                    if (block.type === 'text') {
-                        return { type: 'text', text: block.text };
-                    } else if (block.type === 'image_url') {
-                        return {
-                            type: 'image',
-                            source: {
-                                type: 'url',
-                                url: block.image_url.url
-                            }
-                        };
+            let content = [];
+
+            // 1. Handle text content (and scrub polluted history)
+            if (msg.content) {
+                if (typeof msg.content === 'string') {
+                    // SCRUBBER: Remove "Textify" logs and legacy log formats from history
+                    // This prevents the model from seeing past mistakes and mimicking them.
+                    let scrubbed = msg.content
+                        .replace(/>>> PAST_TOOL_ACTION:[\s\S]*?<<</g, '')
+                        .replace(/>>> PAST_TOOL_RESULT:[\s\S]*?<<</g, '')
+                        .replace(/>>> PAST_TOOL_USAGE:[\s\S]*?<<</g, '')
+                        .replace(/\[LOG: [\s\S]*?\]/g, '') // Legacy format
+                        .replace(/\[Tool Use: [\s\S]*?\]/g, '') // Legacy format
+                        .replace(/\[SYSTEM: [\s\S]*?\]/g, ''); // Legacy format
+
+                    if (scrubbed.trim()) {
+                        content.push({ type: 'text', text: scrubbed });
                     }
-                    return block;
+                } else if (Array.isArray(msg.content)) {
+                    // Handle multimodal content
+                    msg.content.forEach(block => {
+                        if (block.type === 'text') {
+                            let scrubbed = block.text
+                                .replace(/>>> PAST_TOOL_ACTION:[\s\S]*?<<</g, '')
+                                .replace(/>>> PAST_TOOL_RESULT:[\s\S]*?<<</g, '')
+                                .replace(/>>> PAST_TOOL_USAGE:[\s\S]*?<<</g, '')
+                                .replace(/\[LOG: [\s\S]*?\]/g, '')
+                                .replace(/\[Tool Use: [\s\S]*?\]/g, '')
+                                .replace(/\[SYSTEM: [\s\S]*?\]/g, '');
+
+                            if (scrubbed.trim()) {
+                                content.push({ type: 'text', text: scrubbed });
+                            }
+                        } else if (block.type === 'image_url') {
+                            content.push({
+                                type: 'image',
+                                source: {
+                                    type: 'url',
+                                    url: block.image_url.url
+                                }
+                            });
+                        }
+                    });
+                }
+            }
+
+            // 2. Handle tool_calls (for assistant) -> tool_use
+            if (msg.role === 'assistant' && msg.tool_calls && Array.isArray(msg.tool_calls)) {
+                msg.tool_calls.forEach(call => {
+                    if (call.type === 'function') {
+                        let input = {};
+                        try {
+                            input = JSON.parse(call.function.arguments || '{}');
+                        } catch (e) {
+                            console.warn('Failed to parse tool arguments:', call.function.arguments);
+                        }
+
+                        content.push({
+                            type: 'tool_use',
+                            id: call.id,
+                            name: call.function.name,
+                            input: input
+                        });
+                    }
                 });
             }
 
             anthropicMessages.push({
                 role: msg.role === 'assistant' ? 'assistant' : 'user',
                 content: content
+            });
+
+        } else if (msg.role === 'tool') {
+            // Convert OpenAI tool response to Anthropic tool_result
+            // Anthropic expects tool results in 'user' blocks
+
+            // Check if deeper user message merging is needed? 
+            // For now, simply append as a user message with tool_result block.
+            // Note: Anthropic allows multiple tool_results in one user block, but separate blocks are safer for simple conversion.
+
+            anthropicMessages.push({
+                role: 'user',
+                content: [{
+                    type: 'tool_result',
+                    tool_use_id: msg.tool_call_id,
+                    content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)
+                }]
             });
         }
     }
@@ -171,7 +235,7 @@ export function convertAnthropicToOpenAI(anthropicResponse, model, stream = fals
  */
 function mapStopReason(stopReason) {
     if (!stopReason) return 'stop';
-    
+
     const mapping = {
         'end_turn': 'stop',
         'max_tokens': 'length',
@@ -226,14 +290,14 @@ export function convertAnthropicStreamToOpenAI(event, model, messageId = 'chatcm
             } else if (event.content_block?.type === 'tool_use') {
                 // Initialize tool call state
                 const toolCall = event.content_block;
-                const toolCallIndex = toolCallState.has(messageId) 
-                    ? toolCallState.get(messageId).length 
+                const toolCallIndex = toolCallState.has(messageId)
+                    ? toolCallState.get(messageId).length
                     : 0;
-                
+
                 if (!toolCallState.has(messageId)) {
                     toolCallState.set(messageId, []);
                 }
-                
+
                 const state = {
                     id: toolCall.id,
                     type: 'function',
@@ -243,9 +307,9 @@ export function convertAnthropicStreamToOpenAI(event, model, messageId = 'chatcm
                     },
                     index: toolCallIndex
                 };
-                
+
                 toolCallState.get(messageId).push(state);
-                
+
                 // Emit tool call start
                 return {
                     id: messageId,
@@ -290,14 +354,14 @@ export function convertAnthropicStreamToOpenAI(event, model, messageId = 'chatcm
                 if (!toolCallState.has(messageId) || toolCallState.get(messageId).length === 0) {
                     return null;
                 }
-                
+
                 const toolCalls = toolCallState.get(messageId);
                 const currentToolCall = toolCalls[toolCalls.length - 1];
-                
+
                 if (currentToolCall && event.delta.partial_json) {
                     // Append partial JSON to arguments
                     currentToolCall.function.arguments = event.delta.partial_json;
-                    
+
                     return {
                         id: messageId,
                         object: 'chat.completion.chunk',
@@ -332,7 +396,7 @@ export function convertAnthropicStreamToOpenAI(event, model, messageId = 'chatcm
         case 'message_delta':
             // Clean up tool call state
             toolCallState.delete(messageId);
-            
+
             return {
                 id: messageId,
                 object: 'chat.completion.chunk',
@@ -348,7 +412,7 @@ export function convertAnthropicStreamToOpenAI(event, model, messageId = 'chatcm
         case 'message_stop':
             // Clean up tool call state
             toolCallState.delete(messageId);
-            
+
             return {
                 id: messageId,
                 object: 'chat.completion.chunk',

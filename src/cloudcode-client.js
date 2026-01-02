@@ -27,6 +27,7 @@ import {
 import { cacheSignature } from './format/signature-cache.js';
 import { formatDuration, sleep } from './utils/helpers.js';
 import { isRateLimitError, isAuthError } from './errors.js';
+import { logDebugFile } from './utils/logger.js';
 
 /**
  * Check if an error is a rate limit error (429 or RESOURCE_EXHAUSTED)
@@ -283,9 +284,6 @@ export async function sendMessage(anthropicRequest, accountManager) {
         // Handle waiting for sticky account
         if (!account && waitMs > 0) {
             // Silent wait for sticky account (only log if wait is significant)
-            if (waitMs > 30000) {
-                console.log(`[CloudCode] Waiting ${formatDuration(waitMs)} for sticky account...`);
-            }
             await sleep(waitMs);
             accountManager.clearExpiredLimits();
             account = accountManager.getCurrentStickyAccount();
@@ -306,7 +304,6 @@ export async function sendMessage(anthropicRequest, accountManager) {
 
                 // Wait for reset (applies to both single and multi-account modes)
                 const accountCount = accountManager.getAccountCount();
-                console.log(`[CloudCode] All ${accountCount} account(s) rate-limited. Waiting ${formatDuration(allWaitMs)}...`);
                 await sleep(allWaitMs);
                 accountManager.clearExpiredLimits();
                 account = accountManager.pickNext();
@@ -336,6 +333,16 @@ export async function sendMessage(anthropicRequest, accountManager) {
                         ? `${endpoint}/v1internal:streamGenerateContent?alt=sse`
                         : `${endpoint}/v1internal:generateContent`;
 
+                    /* DEBUG: Log full request for Gemini loop debugging
+                    if (payload.request.contents && payload.request.contents.length > 0) {
+                        try {
+                            logDebugFile('gemini-req', payload.requestId, payload.request.contents);
+                        } catch (err) {
+                            console.error('Failed to log request:', err);
+                        }
+                    }
+                    */
+
                     const response = await fetch(url, {
                         method: 'POST',
                         headers: buildHeaders(token, model, isThinking ? 'text/event-stream' : 'application/json'),
@@ -346,7 +353,7 @@ export async function sendMessage(anthropicRequest, accountManager) {
                         const errorText = await response.text();
                         const shortError = errorText.length > 200 ? errorText.substring(0, 200) + '...' : errorText;
                         console.log(`[CloudCode] Error at ${endpoint}: ${response.status} - ${shortError}`);
-                        
+
                         // Log full error for invalid tool/argument errors
                         if (errorText.includes('invalid') && (errorText.includes('tool') || errorText.includes('argument'))) {
                             console.log(`[CloudCode] FULL ERROR TEXT (invalid tool/argument): ${errorText}`);
@@ -384,6 +391,15 @@ export async function sendMessage(anthropicRequest, accountManager) {
 
                     // Non-thinking models use regular JSON
                     const data = await response.json();
+
+                    /*
+                    try {
+                        logDebugFile('gemini-res', payload.requestId, data);
+                    } catch (err) {
+                        console.error('Failed to log response:', err);
+                    }
+                    */
+
                     // Response received successfully (no logging needed)
                     return convertGoogleToAnthropic(data, anthropicRequest.model);
 
@@ -506,8 +522,8 @@ async function parseThinkingSSEResponse(response, originalModel) {
                     }
                 }
             } catch (e) {
-                    console.log('[CloudCode] SSE parse warning:', e.message, 'Raw:', jsonText.slice(0, 100));
-                }
+                console.log('[CloudCode] SSE parse warning:', e.message, 'Raw:', jsonText.slice(0, 100));
+            }
         }
     }
 
@@ -515,16 +531,14 @@ async function parseThinkingSSEResponse(response, originalModel) {
     flushText();
 
     const accumulatedResponse = {
-        candidates: [{ content: { parts: finalParts }, finishReason }],
-        usageMetadata
+        candidates: [{
+            content: {
+                parts: finalParts
+            },
+            finishReason: finishReason
+        }],
+        usageMetadata: usageMetadata
     };
-
-    const partTypes = finalParts.map(p => p.thought ? 'thought' : (p.functionCall ? 'functionCall' : 'text'));
-    console.log('[CloudCode] Response received (SSE), part types:', partTypes);
-    if (finalParts.some(p => p.thought)) {
-        const thinkingPart = finalParts.find(p => p.thought);
-        console.log('[CloudCode] Thinking signature length:', thinkingPart?.thoughtSignature?.length || 0);
-    }
 
     return convertGoogleToAnthropic(accumulatedResponse, originalModel);
 }
@@ -558,9 +572,6 @@ export async function* sendMessageStream(anthropicRequest, accountManager) {
         // Handle waiting for sticky account
         if (!account && waitMs > 0) {
             // Silent wait for sticky account (only log if wait is significant)
-            if (waitMs > 30000) {
-                console.log(`[CloudCode] Waiting ${formatDuration(waitMs)} for sticky account...`);
-            }
             await sleep(waitMs);
             accountManager.clearExpiredLimits();
             account = accountManager.getCurrentStickyAccount();
@@ -581,7 +592,6 @@ export async function* sendMessageStream(anthropicRequest, accountManager) {
 
                 // Wait for reset (applies to both single and multi-account modes)
                 const accountCount = accountManager.getAccountCount();
-                console.log(`[CloudCode] All ${accountCount} account(s) rate-limited. Waiting ${formatDuration(allWaitMs)}...`);
                 await sleep(allWaitMs);
                 accountManager.clearExpiredLimits();
                 account = accountManager.pickNext();
@@ -615,11 +625,21 @@ export async function* sendMessageStream(anthropicRequest, accountManager) {
                         body: JSON.stringify(payload)
                     });
 
+                    /* DEBUG: Log full request for Gemini loop debugging (Streaming)
+                    if (payload.request.contents && payload.request.contents.length > 0) {
+                        try {
+                            logDebugFile('gemini-req-stream', payload.requestId, payload.request.contents);
+                        } catch (err) {
+                            console.error('Failed to log streaming request:', err);
+                        }
+                    }
+                    */
+
                     if (!response.ok) {
                         const errorText = await response.text();
                         const shortError = errorText.length > 200 ? errorText.substring(0, 200) + '...' : errorText;
                         console.log(`[CloudCode] Stream error at ${endpoint}: ${response.status} - ${shortError}`);
-                        
+
                         // Log full error for invalid tool/argument errors
                         if (errorText.includes('invalid') && (errorText.includes('tool') || errorText.includes('argument') || errorText.includes('call'))) {
                             console.log(`[CloudCode] FULL STREAM ERROR TEXT (invalid tool/argument): ${errorText}`);
@@ -801,6 +821,19 @@ async function* streamSSEResponse(response, originalModel) {
                     } else if (part.text !== undefined) {
                         // Skip empty text parts
                         if (!part.text || part.text.trim().length === 0) {
+                            continue;
+                        }
+
+                        // SAFETY FILTER: Block "Textify" tags from reaching the user
+                        // The model might mimic these tags if it sees them in history.
+                        // We must strip them to prevent the user from seeing internal logs.
+                        const trimmedText = part.text.trim();
+                        if (trimmedText.includes('>>> PAST_TOOL_ACTION') ||
+                            trimmedText.includes('>>> PAST_TOOL_RESULT') ||
+                            trimmedText.includes('>>> PAST_TOOL_USAGE') ||
+                            trimmedText.includes('} <<<') || // Fragmented end tag
+                            (trimmedText.includes('with input:') && trimmedText.includes('tool'))) { // Leaked tool action description
+
                             continue;
                         }
 

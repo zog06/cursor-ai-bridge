@@ -86,20 +86,23 @@ export function convertContentToParts(content, isClaudeModel = false, isGeminiMo
                 args: block.input || {}
             };
 
-            // Log tool_use conversion for debugging
-            const argsKeys = Object.keys(functionCall.args);
-            const argsPreview = argsKeys.length > 0 
-                ? argsKeys.map(k => `${k}=${JSON.stringify(functionCall.args[k]).substring(0, 50)}`).join(', ')
-                : '{}';
-            console.log(`[ContentConverter] Converting tool_use: name="${block.name}", id="${block.id || 'none'}", args_keys=[${argsKeys.join(', ')}], args_preview={${argsPreview}}`);
-
             if (isClaudeModel && block.id) {
                 functionCall.id = block.id;
-                console.log(`[ContentConverter] Added id field for Claude model: ${block.id}`);
             }
 
             // Build the part with functionCall
             const part = { functionCall };
+
+            // For Claude models, we need to be careful.
+            // Some versions of the bridge/proxy might handle this differently.
+            // If the standard functionCall format is failing (causing text.text errors),
+            // it implies the proxy is mishandling the conversion back to Anthropic.
+            // However, we cannot simply push { type: 'tool_use' } as that's not a valid Part.
+            // We must stick to valid Google Parts.
+            // Let's ensure 'id' is present (already done above).
+
+            // NOTE: The error 'messages.2.content.0.text.text' suggests a tool_result issue (User message).
+            // See tool_result handling below.
 
             // For Gemini models, include thoughtSignature at the part level
             // This is required by Gemini 3+ for tool calls to work correctly
@@ -109,9 +112,6 @@ export function convertContentToParts(content, isClaudeModel = false, isGeminiMo
 
                 if (!signature && block.id) {
                     signature = getCachedSignature(block.id);
-                    if (signature) {
-                        console.log('[ContentConverter] Restored signature from cache for:', block.id);
-                    }
                 }
 
                 part.thoughtSignature = signature || GEMINI_SKIP_SIGNATURE;
@@ -124,7 +124,12 @@ export function convertContentToParts(content, isClaudeModel = false, isGeminiMo
             let imageParts = [];
 
             if (typeof responseContent === 'string') {
-                responseContent = { result: responseContent };
+                // Wrap in object with 'content' key for Claude? No, Google expects 'output' or 'result' map.
+                // But wait, Anthropic expects 'content' string or list of blocks.
+                // Google's functionResponse.response is a Map<string, any>.
+                // Cloud Code proxies mapping logic:
+                // Google { result: "..." } -> Anthropic { content: "..." } ?
+                responseContent = { content: responseContent };
             } else if (Array.isArray(responseContent)) {
                 // Extract images from tool results first (e.g., from Read tool reading image files)
                 for (const item of responseContent) {
@@ -143,7 +148,7 @@ export function convertContentToParts(content, isClaudeModel = false, isGeminiMo
                     .filter(c => c.type === 'text')
                     .map(c => c.text)
                     .join('\n');
-                responseContent = { result: texts || (imageParts.length > 0 ? 'Image attached' : '') };
+                responseContent = { content: texts || (imageParts.length > 0 ? 'Image attached' : '') };
             }
 
             // Find tool name from multiple sources (priority order):
@@ -152,23 +157,39 @@ export function convertContentToParts(content, isClaudeModel = false, isGeminiMo
             // 3. Skip if not found (invalid tool_result without matching tool_use)
             let toolName = block.name; // Some APIs include name directly
             let nameSource = 'block.name';
-            
+
             if (!toolName && block.tool_use_id) {
                 toolName = toolUseIdToNameMap.get(block.tool_use_id);
                 nameSource = toolName ? 'toolUseIdToNameMap' : 'not found';
             }
 
-            // If we still don't have a tool name, this is an invalid tool_result
-            // Google API requires a valid tool name, so we must skip this block
             if (!toolName) {
-                console.log(`[ContentConverter] WARNING: tool_result without valid tool name (tool_use_id: ${block.tool_use_id || 'none'}, name source: ${nameSource}). Skipping to avoid "invalid tool call use" error.`);
-                console.log(`[ContentConverter] Available tool_use_ids in map: ${Array.from(toolUseIdToNameMap.keys()).join(', ') || 'none'}`);
                 // Skip this tool_result - it's invalid without a matching tool_use
                 continue;
             }
 
-            if (process.env.DEBUG) {
-                console.log(`[ContentConverter] tool_result conversion: tool_use_id=${block.tool_use_id}, tool_name=${toolName}, name_source=${nameSource}`);
+            if (isClaudeModel) {
+                // FALLBACK: Google's functionResponse seems to fail for Claude on this proxy 
+                // (Error: messages.2.content.0.text.text: Field required).
+                // Convert to explicit text format to ensure delivery and loop breaking.
+                let textContent = '';
+                // Handle content type
+                if (responseContent.content && typeof responseContent.content === 'string') {
+                    textContent = responseContent.content;
+                } else if (responseContent.result && typeof responseContent.result === 'string') {
+                    textContent = responseContent.result;
+                } else {
+                    textContent = JSON.stringify(responseContent);
+                }
+
+                parts.push({
+                    text: `[Tool Result for '${toolName}': ${textContent}]`
+                });
+
+                // Add images if any (images are supported in text/user blocks usually)
+                parts.push(...imageParts);
+
+                continue; // Skip functionResponse construction
             }
 
             const functionResponse = {
@@ -176,13 +197,9 @@ export function convertContentToParts(content, isClaudeModel = false, isGeminiMo
                 response: responseContent
             };
 
-            // For Claude models, the id field must match the tool_use_id
-            if (isClaudeModel && block.tool_use_id) {
-                functionResponse.id = block.tool_use_id;
-                if (process.env.DEBUG) {
-                    console.log(`[ContentConverter] Added id field for Claude model: ${block.tool_use_id}`);
-                }
-            }
+            // For Claude models (Legacy path kept just in case, though we fallback above now)
+            // if (isClaudeModel && block.tool_use_id) { ... }
+            functionResponse.id = block.tool_use_id;
 
             parts.push({ functionResponse });
 
@@ -200,7 +217,7 @@ export function convertContentToParts(content, isClaudeModel = false, isGeminiMo
             }
             // Unsigned thinking blocks are dropped upstream
         }
-    }
+}
 
-    return parts;
+return parts;
 }

@@ -14,9 +14,7 @@ import {
     restoreThinkingSignatures,
     removeTrailingThinkingBlocks,
     reorderAssistantContent,
-    filterUnsignedThinkingBlocks,
-    needsThinkingRecovery,
-    closeToolLoopForThinking
+    filterUnsignedThinkingBlocks
 } from './thinking-utils.js';
 import { estimateTokenCount } from '../utils/helpers.js';
 
@@ -27,12 +25,12 @@ import { estimateTokenCount } from '../utils/helpers.js';
  */
 function extractUsedToolNames(messages) {
     const usedTools = new Set();
-    
+
     if (!messages || !Array.isArray(messages)) return usedTools;
-    
+
     for (const msg of messages) {
         if (!msg || !msg.role) continue;
-        
+
         if ((msg.role === 'assistant' || msg.role === 'model') && Array.isArray(msg.content)) {
             for (const block of msg.content) {
                 if (block && block.type === 'tool_use' && block.name) {
@@ -48,7 +46,7 @@ function extractUsedToolNames(messages) {
             }
         }
     }
-    
+
     return usedTools;
 }
 
@@ -64,11 +62,11 @@ function filterToolsByChoice(tools, tool_choice, messages) {
     // DEPRECATED: Tool filtering is disabled. Always return all tools.
     // Only exception: if tool_choice is "none", return empty array (required by API spec)
     if (!tools || tools.length === 0) return tools;
-    
+
     if (tool_choice === 'none') {
         return [];
     }
-    
+
     // Return all tools without filtering
     return tools;
 }
@@ -94,7 +92,7 @@ function calculateToolTokens(tools) {
         const nameTokens = estimateTokenCount(name);
         const descTokens = estimateTokenCount(tool.description || tool.function?.description || tool.custom?.description || '');
         const schemaTokens = estimateTokenCount(tool.input_schema || tool.function?.input_schema || tool.function?.parameters || tool.custom?.input_schema || tool.parameters || {});
-        
+
         // Add overhead for JSON structure (~10 tokens per tool)
         const overhead = 10;
         totalTokens += nameTokens + descTokens + schemaTokens + overhead;
@@ -164,14 +162,14 @@ export function convertAnthropicToGoogle(anthropicRequest) {
         }
     }
 
-    // Apply thinking recovery for Gemini thinking models when needed
-    // This handles corrupted tool loops where thinking blocks are stripped
-    // Claude models handle this differently and don't need this recovery
+    // NOTE: Anti-Mimicry instruction removed - we no longer convert tool_use/tool_result to text.
+    // The system works professionally with native tool formats only.
+
+    // NOTE: Text recovery (closeToolLoopForThinking) is disabled for Gemini models.
+    // With proper signature handling, thinking blocks are preserved correctly
+    // and tool_use/tool_result blocks remain in their native format.
+    // No text conversion is performed - the system works professionally with native tool formats.
     let processedMessages = messages;
-    if (isGeminiModel && isThinking && needsThinkingRecovery(messages)) {
-        console.log('[RequestConverter] Applying thinking recovery for Gemini');
-        processedMessages = closeToolLoopForThinking(messages);
-    }
 
     // Build a map of tool_use_id -> tool_name from all assistant messages
     // This is needed because tool_result blocks only have tool_use_id, not tool name
@@ -203,7 +201,7 @@ export function convertAnthropicToGoogle(anthropicRequest) {
             }
         }
     }
-    
+
     if (process.env.DEBUG && toolUseIdToNameMap.size > 0) {
         console.log(`[RequestConverter] Built tool_use_id map with ${toolUseIdToNameMap.size} entries`);
     }
@@ -216,9 +214,11 @@ export function convertAnthropicToGoogle(anthropicRequest) {
         // For assistant messages, process thinking blocks and reorder content
         if ((msg.role === 'assistant' || msg.role === 'model') && Array.isArray(msgContent)) {
             // First, try to restore signatures for unsigned thinking blocks from cache
-            msgContent = restoreThinkingSignatures(msgContent);
+            // Pass isGeminiModel flag so Gemini placeholder signatures are preserved
+            msgContent = restoreThinkingSignatures(msgContent, isGeminiModel);
             // Remove trailing unsigned thinking blocks
-            msgContent = removeTrailingThinkingBlocks(msgContent);
+            // Pass isGeminiModel flag so Gemini placeholder signatures are preserved
+            msgContent = removeTrailingThinkingBlocks(msgContent, isGeminiModel);
             // Reorder: thinking first, then text, then tool_use
             msgContent = reorderAssistantContent(msgContent);
         }
@@ -228,7 +228,6 @@ export function convertAnthropicToGoogle(anthropicRequest) {
         // SAFETY: Google API requires at least one part per content message
         // This happens when all thinking blocks are filtered out (unsigned)
         if (parts.length === 0) {
-            console.log('[RequestConverter] WARNING: Empty parts array after filtering, adding placeholder');
             parts.push({ text: '' });
         }
 
@@ -239,9 +238,11 @@ export function convertAnthropicToGoogle(anthropicRequest) {
         googleRequest.contents.push(content);
     }
 
-    // Filter unsigned thinking blocks for Claude models
-    if (isClaudeModel) {
-        googleRequest.contents = filterUnsignedThinkingBlocks(googleRequest.contents);
+    // Filter unsigned thinking blocks for both Claude and Gemini models
+    // This provides an extra safety layer after content conversion
+    // Note: Gemini placeholder signatures are already handled in restoreThinkingSignatures
+    if (isClaudeModel || isGeminiModel) {
+        googleRequest.contents = filterUnsignedThinkingBlocks(googleRequest.contents, isGeminiModel);
     }
 
     // Generation config
@@ -291,7 +292,7 @@ export function convertAnthropicToGoogle(anthropicRequest) {
     // This section is kept for backward compatibility but filtering logic is disabled.
     let filteredTools = tools;
     let toolFilteringInfo = null;
-    
+
     if (tools && tools.length > 0) {
         // DEPRECATED: filterToolsByChoice now returns all tools (except when tool_choice is 'none')
         filteredTools = filterToolsByChoice(tools, tool_choice, processedMessages);
@@ -309,19 +310,10 @@ export function convertAnthropicToGoogle(anthropicRequest) {
             tokensSaved: 0, // No filtering, so no tokens saved
             toolNames: toolTokens.toolNames
         };
-
-        // Log tool count (no filtering message)
-        if (filteredToolCount > 50) {
-            console.log(`[RequestConverter] Warning: ${filteredToolCount} tools enabled (high count, ~${toolTokens.totalTokens} tokens)`);
-        } else {
-            console.log(`[RequestConverter] ${filteredToolCount} tools enabled (~${toolTokens.totalTokens} tokens)`);
-        }
     }
 
     // Convert tools to Google format (all tools, no filtering)
     if (filteredTools && filteredTools.length > 0) {
-        console.log(`[RequestConverter] Converting ${filteredTools.length} tools to Google format (model: ${modelName}, isClaude: ${isClaudeModel}, isGemini: ${isGeminiModel})`);
-        
         const functionDeclarations = filteredTools.map((tool, idx) => {
             // Extract name from various possible locations
             const name = tool.name || tool.function?.name || tool.custom?.name || `tool-${idx}`;
@@ -340,41 +332,29 @@ export function convertAnthropicToGoogle(anthropicRequest) {
             // Log original schema structure
             const schemaType = schema?.type || 'unknown';
             const schemaProperties = schema?.properties ? Object.keys(schema.properties) : [];
-            console.log(`[RequestConverter] Tool "${name}": original schema type="${schemaType}", properties=[${schemaProperties.join(', ')}], keys=[${Object.keys(schema).join(', ')}]`);
+            // console.log(`[RequestConverter] Tool "${name}": original schema type="${schemaType}", properties=[${schemaProperties.join(', ')}], keys=[${Object.keys(schema).join(', ')}]`);
 
             // For Claude models, use minimal sanitization to preserve schema integrity
             // Claude models can handle more JSON Schema features than Gemini
             // For Gemini models, apply full cleaning pipeline for VALIDATED mode
             let parameters;
             const originalSchemaKeys = Object.keys(schema || {});
-            
+
             if (isGeminiModel) {
                 // Gemini requires aggressive sanitization
                 parameters = sanitizeSchema(schema);
                 parameters = cleanSchemaForGemini(parameters);
-                console.log(`[RequestConverter] Tool "${name}": Gemini schema sanitization applied (${originalSchemaKeys.length} → ${Object.keys(parameters).length} top-level keys)`);
+                // console.log(`[RequestConverter] Tool "${name}": Gemini schema sanitization applied (${originalSchemaKeys.length} → ${Object.keys(parameters).length} top-level keys)`);
             } else if (isClaudeModel) {
                 // Claude models: minimal sanitization - only remove truly problematic fields
                 // Preserve most schema features to avoid "invalid arguments" errors
                 parameters = sanitizeSchemaForClaude(schema);
-                const removedFields = originalSchemaKeys.filter(k => !(k in parameters));
-                const finalProperties = parameters?.properties ? Object.keys(parameters.properties) : [];
-                if (removedFields.length > 0) {
-                    console.log(`[RequestConverter] Tool "${name}": Claude schema sanitization removed fields: ${removedFields.join(', ')}`);
-                } else {
-                    console.log(`[RequestConverter] Tool "${name}": Claude schema sanitization preserved all fields (${originalSchemaKeys.length} keys)`);
-                }
-                console.log(`[RequestConverter] Tool "${name}": Final schema type="${parameters?.type || 'unknown'}", properties=[${finalProperties.join(', ')}]`);
             } else {
                 // Other models: use standard sanitization
                 parameters = sanitizeSchema(schema);
-                console.log(`[RequestConverter] Tool "${name}": Standard schema sanitization applied`);
             }
 
             const sanitizedName = String(name).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
-            if (sanitizedName !== name) {
-                console.log(`[RequestConverter] Tool name sanitized: "${name}" → "${sanitizedName}"`);
-            }
 
             return {
                 name: sanitizedName,
@@ -383,13 +363,11 @@ export function convertAnthropicToGoogle(anthropicRequest) {
             };
         });
 
-        console.log(`[RequestConverter] Converted ${functionDeclarations.length} tools. Tool names: [${functionDeclarations.map(t => t.name).join(', ')}]`);
         googleRequest.tools = [{ functionDeclarations }];
     }
 
     // Cap max tokens for Gemini models
     if (isGeminiModel && googleRequest.generationConfig.maxOutputTokens > GEMINI_MAX_OUTPUT_TOKENS) {
-        console.log(`[RequestConverter] Capping Gemini max_tokens from ${googleRequest.generationConfig.maxOutputTokens} to ${GEMINI_MAX_OUTPUT_TOKENS}`);
         googleRequest.generationConfig.maxOutputTokens = GEMINI_MAX_OUTPUT_TOKENS;
     }
 

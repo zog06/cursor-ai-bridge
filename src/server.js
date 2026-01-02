@@ -10,15 +10,17 @@ import crypto from 'crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { dirname } from 'path';
 import { sendMessage, sendMessageStream, listModels, getModelQuotas } from './cloudcode-client.js';
+import { getAuthorizationUrl, startCallbackServer, completeOAuthFlow } from './oauth.js';
 import { forceRefresh } from './token-extractor.js';
 import { REQUEST_BODY_LIMIT, API_KEY, API_KEY_PATH } from './constants.js';
 import { AccountManager } from './account-manager.js';
 import { formatDuration, estimateTokenCount } from './utils/helpers.js';
+import { logDebugFile, logError } from './utils/logger.js';
 import { convertOpenAIToAnthropic, convertAnthropicToOpenAI, convertAnthropicStreamToOpenAI } from './format/openai-converter.js';
-import { 
-    readCursorSettings, 
-    configureCursorForProxy, 
-    removeCursorProxyConfig, 
+import {
+    readCursorSettings,
+    configureCursorForProxy,
+    removeCursorProxyConfig,
     isProxyConfigured,
     getOpenAISettings,
     setOpenAIApiKey,
@@ -42,7 +44,7 @@ function loadOrGenerateApiKey() {
         console.log('[Server] Using API key from environment variable');
         return API_KEY;
     }
-    
+
     // Second priority: load from file
     if (existsSync(API_KEY_PATH)) {
         try {
@@ -55,24 +57,24 @@ function loadOrGenerateApiKey() {
             console.error('[Server] Failed to read API key file:', error.message);
         }
     }
-    
+
     // Generate new key and save it
     const newKey = 'ag_' + crypto.randomBytes(32).toString('hex');
-    
+
     try {
         // Ensure directory exists
         const dir = dirname(API_KEY_PATH);
         if (!existsSync(dir)) {
             mkdirSync(dir, { recursive: true });
         }
-        
+
         // Save to file
         writeFileSync(API_KEY_PATH, newKey, 'utf8');
         console.log(`[Server] Generated and saved new API key to: ${API_KEY_PATH}`);
     } catch (error) {
         console.error('[Server] Failed to save API key to file:', error.message);
     }
-    
+
     console.log(`
 ╔══════════════════════════════════════════════════════════════╗
 ║  🔑 API Key Generated (saved to config file)                ║
@@ -87,7 +89,7 @@ function loadOrGenerateApiKey() {
 ║                                                              ║
 ╚══════════════════════════════════════════════════════════════╝
     `);
-    
+
     return newKey;
 }
 
@@ -96,14 +98,14 @@ function loadOrGenerateApiKey() {
  */
 function regenerateApiKey() {
     const newKey = 'ag_' + crypto.randomBytes(32).toString('hex');
-    
+
     try {
         // Ensure directory exists
         const dir = dirname(API_KEY_PATH);
         if (!existsSync(dir)) {
             mkdirSync(dir, { recursive: true });
         }
-        
+
         // Save to file
         writeFileSync(API_KEY_PATH, newKey, 'utf8');
         console.log('[Server] Regenerated and saved new API key');
@@ -111,7 +113,7 @@ function regenerateApiKey() {
         console.error('[Server] Failed to save new API key:', error.message);
         throw error;
     }
-    
+
     return newKey;
 }
 
@@ -139,13 +141,6 @@ const NGROK_CACHE_TTL = 30000; // 30 seconds
  * Add a request to the history
  */
 function addRequestToHistory(request) {
-    // Debug: Log when usage or tools data is present
-    if (request.usage || request.tools) {
-        console.log(`[Server] Adding request to history with usage:`, request.usage ? 'yes' : 'no', 'tools:', request.tools ? 'yes' : 'no');
-        if (request.tools) {
-            console.log(`[Server] Tools info:`, JSON.stringify(request.tools));
-        }
-    }
     requestHistory.unshift(request);
     if (requestHistory.length > MAX_REQUEST_HISTORY) {
         requestHistory.pop();
@@ -196,11 +191,12 @@ app.use(express.json({ limit: REQUEST_BODY_LIMIT }));
  */
 function authenticateApiKey(req, res, next) {
     // Skip authentication for health check, dashboard API, ngrok control, and cursor settings endpoints
-    if (req.path === '/health' || 
-        req.path === '/api/dashboard' || 
+    if (req.path === '/health' ||
+        req.path === '/api/dashboard' ||
         req.path === '/api/account-limits' ||
         req.path.startsWith('/api/ngrok/') ||
-        req.path.startsWith('/api/cursor/')) {
+        req.path.startsWith('/api/cursor/') ||
+        req.path.startsWith('/api/auth/')) {
         return next();
     }
 
@@ -232,40 +228,23 @@ app.use(authenticateApiKey);
  */
 function logResponseForDebug(response, model) {
     if (!response || !response.content) return;
-    
-    const contentTypes = response.content.map(block => {
-        if (block.type === 'thinking') {
-            const hasSignature = block.signature && block.signature !== 'gemini-thinking-no-signature';
-            return `thinking(sig:${hasSignature ? 'yes' : 'no'})`;
-        }
-        if (block.type === 'tool_use') {
-            return `tool_use(${block.name})`;
-        }
-        if (block.type === 'text') {
-            const preview = (block.text || '').slice(0, 50).replace(/\n/g, ' ');
-            return `text("${preview}${block.text.length > 50 ? '...' : ''}")`;
-        }
-        return block.type || 'unknown';
-    });
-    
-    console.log(`[Server] Response for ${model}: [${contentTypes.join(', ')}]`);
-    
+
     // Check for potential loop indicators
     const hasThinking = response.content.some(b => b.type === 'thinking');
     const hasToolUse = response.content.some(b => b.type === 'tool_use');
     const hasText = response.content.some(b => b.type === 'text');
-    const thinkingWithoutSignature = response.content.filter(b => 
+    const thinkingWithoutSignature = response.content.filter(b =>
         b.type === 'thinking' && (!b.signature || b.signature === 'gemini-thinking-no-signature')
     ).length;
-    
+
     if (hasToolUse && !hasThinking && model.includes('gemini')) {
         console.log(`[Server] ⚠️ WARNING: Gemini tool_use without thinking block - potential loop risk!`);
     }
-    
+
     if (thinkingWithoutSignature > 0) {
         console.log(`[Server] ⚠️ WARNING: ${thinkingWithoutSignature} thinking block(s) without valid signature`);
     }
-    
+
     if (!hasText && !hasToolUse && hasThinking) {
         console.log(`[Server] ⚠️ WARNING: Response has only thinking blocks - might cause loop`);
     }
@@ -317,7 +296,6 @@ function parseError(error) {
 
 // Request logging middleware
 app.use((req, res, next) => {
-    console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
     next();
 });
 
@@ -400,7 +378,7 @@ app.get('/api/ngrok/status', async (req, res) => {
         } catch (error) {
             // ngrok not running
         }
-        
+
         res.json(ngrokStatus);
     } catch (error) {
         res.status(500).json({ status: 'error', message: error.message });
@@ -428,29 +406,29 @@ app.get('/api/cursor/settings', async (req, res) => {
 app.post('/api/cursor/configure', async (req, res) => {
     try {
         const { apiKey, baseUrl, model } = req.body;
-        
+
         if (!apiKey || !baseUrl) {
-            return res.status(400).json({ 
-                status: 'error', 
-                message: 'apiKey and baseUrl are required' 
+            return res.status(400).json({
+                status: 'error',
+                message: 'apiKey and baseUrl are required'
             });
         }
-        
+
         const result = await configureCursorForProxy(
-            apiKey, 
-            baseUrl, 
+            apiKey,
+            baseUrl,
             model || 'claude-sonnet-4-5-thinking'
         );
-        
+
         if (result.success) {
-            res.json({ 
-                status: 'success', 
+            res.json({
+                status: 'success',
                 message: 'Cursor configured successfully',
                 path: result.path
             });
         } else {
-            res.status(500).json({ 
-                status: 'error', 
+            res.status(500).json({
+                status: 'error',
                 message: result.error || 'Failed to configure Cursor'
             });
         }
@@ -462,15 +440,15 @@ app.post('/api/cursor/configure', async (req, res) => {
 app.post('/api/cursor/remove', async (req, res) => {
     try {
         const result = await removeCursorProxyConfig();
-        
+
         if (result.success) {
-            res.json({ 
-                status: 'success', 
+            res.json({
+                status: 'success',
                 message: 'Proxy configuration removed from Cursor'
             });
         } else {
-            res.status(500).json({ 
-                status: 'error', 
+            res.status(500).json({
+                status: 'error',
                 message: result.error || 'Failed to remove configuration'
             });
         }
@@ -485,26 +463,26 @@ app.post('/api/cursor/remove', async (req, res) => {
 app.post('/api/cursor/openai/api-key', async (req, res) => {
     try {
         const { apiKey, enabled } = req.body;
-        
+
         if (apiKey === undefined) {
-            return res.status(400).json({ 
-                status: 'error', 
-                message: 'apiKey is required' 
+            return res.status(400).json({
+                status: 'error',
+                message: 'apiKey is required'
             });
         }
-        
-        const result = enabled !== undefined 
+
+        const result = enabled !== undefined
             ? await setOpenAIApiKey(apiKey, enabled)
             : await setOpenAIApiKey(apiKey, true);
-        
+
         if (result.success) {
-            res.json({ 
-                status: 'success', 
+            res.json({
+                status: 'success',
                 message: 'OpenAI API Key updated successfully'
             });
         } else {
-            res.status(500).json({ 
-                status: 'error', 
+            res.status(500).json({
+                status: 'error',
                 message: result.error || 'Failed to update API Key'
             });
         }
@@ -519,26 +497,26 @@ app.post('/api/cursor/openai/api-key', async (req, res) => {
 app.post('/api/cursor/openai/base-url', async (req, res) => {
     try {
         const { baseUrl, enabled } = req.body;
-        
+
         if (baseUrl === undefined) {
-            return res.status(400).json({ 
-                status: 'error', 
-                message: 'baseUrl is required' 
+            return res.status(400).json({
+                status: 'error',
+                message: 'baseUrl is required'
             });
         }
-        
-        const result = enabled !== undefined 
+
+        const result = enabled !== undefined
             ? await setOpenAIBaseUrl(baseUrl, enabled)
             : await setOpenAIBaseUrl(baseUrl, true);
-        
+
         if (result.success) {
-            res.json({ 
-                status: 'success', 
+            res.json({
+                status: 'success',
                 message: 'OpenAI Base URL updated successfully'
             });
         } else {
-            res.status(500).json({ 
-                status: 'error', 
+            res.status(500).json({
+                status: 'error',
                 message: result.error || 'Failed to update Base URL'
             });
         }
@@ -553,24 +531,24 @@ app.post('/api/cursor/openai/base-url', async (req, res) => {
 app.post('/api/cursor/openai/toggle-api-key', async (req, res) => {
     try {
         const { enabled } = req.body;
-        
+
         if (enabled === undefined) {
-            return res.status(400).json({ 
-                status: 'error', 
-                message: 'enabled is required' 
+            return res.status(400).json({
+                status: 'error',
+                message: 'enabled is required'
             });
         }
-        
+
         const result = await toggleOpenAIApiKey(enabled);
-        
+
         if (result.success) {
-            res.json({ 
-                status: 'success', 
+            res.json({
+                status: 'success',
                 message: `OpenAI API Key ${enabled ? 'enabled' : 'disabled'}`
             });
         } else {
-            res.status(500).json({ 
-                status: 'error', 
+            res.status(500).json({
+                status: 'error',
                 message: result.error || 'Failed to toggle API Key'
             });
         }
@@ -585,24 +563,24 @@ app.post('/api/cursor/openai/toggle-api-key', async (req, res) => {
 app.post('/api/cursor/openai/toggle-base-url', async (req, res) => {
     try {
         const { enabled } = req.body;
-        
+
         if (enabled === undefined) {
-            return res.status(400).json({ 
-                status: 'error', 
-                message: 'enabled is required' 
+            return res.status(400).json({
+                status: 'error',
+                message: 'enabled is required'
             });
         }
-        
+
         const result = await toggleOpenAIBaseUrl(enabled);
-        
+
         if (result.success) {
-            res.json({ 
-                status: 'success', 
+            res.json({
+                status: 'success',
                 message: `OpenAI Base URL ${enabled ? 'enabled' : 'disabled'}`
             });
         } else {
-            res.status(500).json({ 
-                status: 'error', 
+            res.status(500).json({
+                status: 'error',
                 message: result.error || 'Failed to toggle Base URL'
             });
         }
@@ -639,7 +617,7 @@ app.get('/api/dashboard', async (req, res) => {
         // Get ngrok status (cached, refresh every 30 seconds)
         let ngrokStatus = { status: 'disconnected', url: null };
         const now = Date.now();
-        
+
         // Use cache if still valid
         if (ngrokStatusCache && (now - ngrokStatusCacheTime) < NGROK_CACHE_TTL) {
             ngrokStatus = ngrokStatusCache;
@@ -670,7 +648,7 @@ app.get('/api/dashboard', async (req, res) => {
                 // ngrok not running or not accessible
                 ngrokStatus = { status: 'disconnected', url: null };
             }
-            
+
             // Update cache
             ngrokStatusCache = ngrokStatus;
             ngrokStatusCacheTime = now;
@@ -705,6 +683,49 @@ app.get('/api/dashboard', async (req, res) => {
             error: error.message,
             timestamp: new Date().toISOString()
         });
+    }
+});
+
+/**
+ * Start OAuth flow for adding a Google account
+ */
+app.get('/api/auth/start', async (req, res) => {
+    try {
+        // Generate auth URL and state
+        const { url, verifier, state } = getAuthorizationUrl();
+        
+        // Start background callback server
+        // We don't await this because it blocks until the user logs in
+        // Instead, we set up the promise chain to handle the result
+        startCallbackServer(state)
+            .then(async (code) => {
+                console.log('[Server] Received OAuth code, exchanging for tokens...');
+                try {
+                    const result = await completeOAuthFlow(code, verifier);
+                    
+                    // Add to account manager
+                    await accountManager.addAccount({
+                        email: result.email,
+                        refreshToken: result.refreshToken,
+                        projectId: result.projectId
+                    });
+                    
+                    console.log(`[Server] Successfully added account: ${result.email}`);
+                } catch (error) {
+                    console.error('[Server] Failed to complete OAuth flow:', error.message);
+                }
+            })
+            .catch(error => {
+                // Timeout or server error
+                console.error('[Server] OAuth callback server error:', error.message);
+            });
+
+        res.json({
+            status: 'success',
+            url: url
+        });
+    } catch (error) {
+        res.status(500).json({ status: 'error', message: error.message });
     }
 });
 
@@ -938,7 +959,7 @@ app.post('/api/regenerate-api-key', (req, res) => {
     try {
         const newKey = regenerateApiKey();
         serverApiKey = newKey; // Update in-memory key
-        
+
         res.json({
             status: 'success',
             message: 'API key regenerated successfully',
@@ -1004,7 +1025,7 @@ app.post('/v1/messages', async (req, res) => {
     const requestId = crypto.randomUUID();
     let requestStatus = 'pending';
     let requestError = null;
-    
+
     try {
         // Ensure account manager is initialized
         await ensureInitialized();
@@ -1092,7 +1113,7 @@ app.post('/v1/messages', async (req, res) => {
             const result = m.convertAnthropicToGoogle(request);
             return result;
         });
-        
+
         // Override toolInfo with tool metadata if available (deprecated - no filtering applied)
         if (toolMetadata) {
             toolInfo = {
@@ -1133,7 +1154,7 @@ app.post('/v1/messages', async (req, res) => {
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0
                 };
-                
+
                 // Track content blocks for debugging
                 const contentBlocks = [];
                 let currentBlockIndex = -1;
@@ -1153,7 +1174,7 @@ app.post('/v1/messages', async (req, res) => {
                     if (event.type === 'message_delta' && event.usage) {
                         streamUsage.output_tokens = event.usage.output_tokens || 0;
                     }
-                    
+
                     // Track content blocks for debugging
                     if (event.type === 'content_block_start') {
                         currentBlockIndex = event.index;
@@ -1163,14 +1184,14 @@ app.post('/v1/messages', async (req, res) => {
                             hasSignature: false,
                             text: ''
                         };
-                        
+
                         // Check for thinking signature
                         if (event.content_block?.type === 'thinking' && event.content_block?.signature) {
-                            contentBlocks[currentBlockIndex].hasSignature = 
+                            contentBlocks[currentBlockIndex].hasSignature =
                                 event.content_block.signature !== 'gemini-thinking-no-signature';
                         }
                     }
-                    
+
                     if (event.type === 'content_block_delta' && currentBlockIndex >= 0) {
                         if (event.delta?.text) {
                             contentBlocks[currentBlockIndex].text += event.delta.text;
@@ -1178,46 +1199,29 @@ app.post('/v1/messages', async (req, res) => {
                     }
                 }
                 res.end();
-                
-                // Debug log the streamed content
+
+                // Check for loop indicators
                 if (contentBlocks.length > 0) {
-                    const contentSummary = contentBlocks.map((block, i) => {
-                        if (block.type === 'thinking') {
-                            return `thinking(sig:${block.hasSignature ? 'yes' : 'no'})`;
-                        }
-                        if (block.type === 'tool_use') {
-                            return `tool_use(${block.name || 'unknown'})`;
-                        }
-                        if (block.type === 'text') {
-                            const preview = block.text.slice(0, 50).replace(/\n/g, ' ');
-                            return `text("${preview}${block.text.length > 50 ? '...' : ''}")`;
-                        }
-                        return block.type || 'unknown';
-                    });
-                    
-                    console.log(`[Server] Streamed response for ${request.model}: [${contentSummary.join(', ')}]`);
-                    
-                    // Check for loop indicators
                     const hasThinking = contentBlocks.some(b => b.type === 'thinking');
                     const hasToolUse = contentBlocks.some(b => b.type === 'tool_use');
                     const hasText = contentBlocks.some(b => b.type === 'text');
-                    const thinkingWithoutSig = contentBlocks.filter(b => 
+                    const thinkingWithoutSig = contentBlocks.filter(b =>
                         b.type === 'thinking' && !b.hasSignature
                     ).length;
-                    
+
                     if (hasToolUse && !hasThinking && request.model.includes('gemini')) {
                         console.log(`[Server] ⚠️ WARNING: Gemini tool_use without thinking - LOOP RISK!`);
                     }
-                    
+
                     if (thinkingWithoutSig > 0) {
                         console.log(`[Server] ⚠️ WARNING: ${thinkingWithoutSig} thinking block(s) without valid signature`);
                     }
-                    
+
                     if (!hasText && !hasToolUse && hasThinking) {
                         console.log(`[Server] ⚠️ WARNING: Only thinking blocks, no text/tools - might cause loop`);
                     }
                 }
-                
+
                 // Track successful streaming request with token usage
                 const duration = Date.now() - requestStartTime;
                 addRequestToHistory({
@@ -1243,7 +1247,7 @@ app.post('/v1/messages', async (req, res) => {
                     error: { type: errorType, message: errorMessage }
                 })}\n\n`);
                 res.end();
-                
+
                 // Track failed streaming request
                 const duration = Date.now() - requestStartTime;
                 addRequestToHistory({
@@ -1262,12 +1266,12 @@ app.post('/v1/messages', async (req, res) => {
         } else {
             // Handle non-streaming response
             const response = await sendMessage(request, accountManager);
-            
+
             // Debug log the response
             logResponseForDebug(response, request.model);
-            
+
             res.json(response);
-            
+
             // Track successful non-streaming request with token usage
             const duration = Date.now() - requestStartTime;
             const usage = response.usage || {};
@@ -1327,7 +1331,7 @@ app.post('/v1/messages', async (req, res) => {
                 }
             });
         }
-        
+
         // Track failed request
         const duration = Date.now() - requestStartTime;
         addRequestToHistory({
@@ -1349,7 +1353,7 @@ app.post('/v1/messages', async (req, res) => {
 app.post('/chat/completions', async (req, res) => {
     const requestStartTime = Date.now();
     const requestId = crypto.randomUUID();
-    
+
     try {
         // Ensure account manager is initialized
         await ensureInitialized();
@@ -1362,6 +1366,15 @@ app.post('/chat/completions', async (req, res) => {
 
         const openaiRequest = req.body;
         const { model, messages, stream, tools } = openaiRequest;
+
+        // Log incoming OpenAI request
+        /*
+        try {
+            logDebugFile('openai-req', 'incoming-' + Date.now(), openaiRequest);
+        } catch (e) {
+            console.error('[Server] Failed to log incoming OpenAI request:', e);
+        }
+        */
 
         // Calculate tool token usage for logging
         let toolInfo = null;
@@ -1405,14 +1418,14 @@ app.post('/chat/completions', async (req, res) => {
 
         // Convert OpenAI format to Anthropic format
         const anthropicRequest = convertOpenAIToAnthropic(openaiRequest);
-        
+
         // Get tool metadata from request conversion
         // DEPRECATED: Tool filtering is disabled. This now returns all tools without filtering.
         const { toolMetadata } = await import('./format/request-converter.js').then(m => {
             const result = m.convertAnthropicToGoogle(anthropicRequest);
             return result;
         });
-        
+
         // Override toolInfo with tool metadata if available (deprecated - no filtering applied)
         if (toolMetadata) {
             toolInfo = {
@@ -1421,7 +1434,7 @@ app.post('/chat/completions', async (req, res) => {
                 names: toolMetadata.toolNames
             };
         }
-        
+
         // Removed verbose logging - only log errors
 
         if (stream) {
@@ -1466,7 +1479,7 @@ app.post('/chat/completions', async (req, res) => {
                 }
                 res.write('data: [DONE]\n\n');
                 res.end();
-                
+
                 // Track successful streaming request
                 const duration = Date.now() - requestStartTime;
                 addRequestToHistory({
@@ -1489,7 +1502,7 @@ app.post('/chat/completions', async (req, res) => {
                     error: { type: errorType, message: errorMessage }
                 })}\n\n`);
                 res.end();
-                
+
                 // Track failed streaming request
                 const duration = Date.now() - requestStartTime;
                 addRequestToHistory({
@@ -1510,7 +1523,7 @@ app.post('/chat/completions', async (req, res) => {
             const anthropicResponse = await sendMessage(anthropicRequest, accountManager);
             const openaiResponse = convertAnthropicToOpenAI(anthropicResponse, model || anthropicRequest.model);
             res.json(openaiResponse);
-            
+
             // Track successful non-streaming request
             const duration = Date.now() - requestStartTime;
             const usage = anthropicResponse.usage || {};
@@ -1563,7 +1576,7 @@ app.post('/chat/completions', async (req, res) => {
                 }
             });
         }
-        
+
         // Track failed request
         const duration = Date.now() - requestStartTime;
         addRequestToHistory({

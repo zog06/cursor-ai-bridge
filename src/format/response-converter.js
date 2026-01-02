@@ -72,12 +72,12 @@ export function convertGoogleToAnthropic(googleResponse, model) {
             const toolId = part.functionCall.id || `toolu_${crypto.randomBytes(12).toString('hex')}`;
             const args = part.functionCall.args || {};
             const argsKeys = Object.keys(args);
-            const argsPreview = argsKeys.length > 0 
+            const argsPreview = argsKeys.length > 0
                 ? argsKeys.map(k => `${k}=${JSON.stringify(args[k]).substring(0, 50)}`).join(', ')
                 : '{}';
-            
+
             console.log(`[ResponseConverter] Received tool call from API: name="${part.functionCall.name}", id="${toolId}", args_keys=[${argsKeys.join(', ')}], args_preview={${argsPreview}}`);
-            
+
             const toolUseBlock = {
                 type: 'tool_use',
                 id: toolId,
@@ -103,9 +103,9 @@ export function convertGoogleToAnthropic(googleResponse, model) {
     if (isGeminiModel && hasToolCalls && !hasThinkingBlock) {
         const firstToolUse = anthropicContent.find(block => block.type === 'tool_use');
         const toolName = firstToolUse?.name || 'tool';
-        
+
         console.log(`[ResponseConverter] Gemini tool_use without thinking detected, injecting synthetic thinking block`);
-        
+
         // Insert synthetic thinking block at the beginning
         anthropicContent.unshift(createSyntheticThinkingBlock(toolName));
     }

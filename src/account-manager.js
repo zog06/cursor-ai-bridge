@@ -618,6 +618,45 @@ export class AccountManager {
     getAllAccounts() {
         return this.#accounts;
     }
+
+    /**
+     * Add a new account and save to disk
+     * @param {Object} accountData - Account data to add
+     * @returns {Promise<boolean>} True if added, false if updated existing
+     */
+    async addAccount(accountData) {
+        const existingIndex = this.#accounts.findIndex(a => a.email === accountData.email);
+        
+        const newAccount = {
+            ...accountData,
+            source: 'oauth', // Force oauth source for added accounts
+            isRateLimited: false,
+            rateLimitResetTime: null,
+            lastUsed: null,
+            isInvalid: false,
+            invalidReason: null
+        };
+
+        if (existingIndex >= 0) {
+            // Update existing
+            this.#accounts[existingIndex] = {
+                ...this.#accounts[existingIndex],
+                ...newAccount,
+                // Preserve stats if needed, but usually a re-add means refresh
+                addedAt: new Date().toISOString()
+            };
+            console.log(`[AccountManager] Updated existing account: ${newAccount.email}`);
+            await this.saveToDisk();
+            return false;
+        } else {
+            // Add new
+            newAccount.addedAt = new Date().toISOString();
+            this.#accounts.push(newAccount);
+            console.log(`[AccountManager] Added new account: ${newAccount.email}`);
+            await this.saveToDisk();
+            return true;
+        }
+    }
 }
 
 export default AccountManager;

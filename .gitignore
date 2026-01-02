@@ -28,3 +28,8 @@ tests/utils/*.jpeg
 # Build output
 dist/
 build/
+/logs
+project_progress.md
+debug_state.js
+analyze_log.js
+analyze_flow.js
