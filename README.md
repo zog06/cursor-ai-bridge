@@ -4,6 +4,17 @@
 
 > **Model Status:** Claude models are fully tested and working smoothly. Gemini models are available but have not been extensively tested yet.
 
+**Tested and Working Models:**
+
+| Model ID | Status | Description |
+|----------|--------|-------------|
+| `claude-sonnet-4-5-thinking` | ✅ Tested | Claude Sonnet 4.5 with extended thinking |
+| `claude-opus-4-5-thinking` | ✅ Tested | Claude Opus 4.5 with extended thinking |
+| `claude-sonnet-4-5` | ✅ Tested | Claude Sonnet 4.5 without thinking |
+| `gemini-3-flash` | ⚠️ Not Yet Tested | Gemini 3 Flash with thinking |
+| `gemini-3-pro-low` | ⚠️ Not Yet Tested | Gemini 3 Pro Low with thinking |
+| `gemini-3-pro-high` | ⚠️ Not Yet Tested | Gemini 3 Pro High with thinking |
+
 A local proxy server that exposes **Anthropic-compatible** and **OpenAI-compatible** APIs, allowing you to use Claude and Gemini models through **Cursor IDE** and other compatible tools. The proxy connects to Antigravity's Cloud Code API and provides seamless integration with Cursor IDE.
 
 ## Features
