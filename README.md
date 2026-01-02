@@ -18,7 +18,7 @@ A local proxy server that exposes **Anthropic-compatible** and **OpenAI-compatib
 
 ## Web Dashboard
 
-Access the web dashboard at `http://localhost:3030` (when running with `npm run start:full`) for comprehensive monitoring and management:
+Access the web dashboard at `http://localhost:3030` (when running with `npm start` or `npm run start:full`) for comprehensive monitoring and management:
 
 ![Dashboard Screenshot](images/screenshot.png)
 
@@ -201,19 +201,35 @@ ngrok config add-authtoken YOUR_NGROK_TOKEN
 
 ### 3. Start the Proxy Server
 
-**Backend only:**
+**Default (Full stack - backend + frontend + ngrok):**
 
 ```bash
 npm start
 ```
 
-**With ngrok tunnel (required for Cursor IDE):**
+This is the default command that starts everything you need: backend server, frontend dashboard, and ngrok tunnel.
+
+**Other options:**
+
+**Backend only (without ngrok):**
+
+```bash
+npm run start:backend
+```
+
+**Backend with ngrok tunnel (no frontend):**
 
 ```bash
 npm run start:ngrok
 ```
 
-**Full stack (backend + frontend + ngrok):**
+**Backend + frontend (without ngrok):**
+
+```bash
+npm run start:all
+```
+
+**Full stack (same as `npm start`):**
 
 ```bash
 npm run start:full
@@ -247,6 +263,8 @@ ANTIGRAVITY_PROXY_API_KEY=your-secret-key-here npm start
 ```bash
 PORT=3000 npm start
 ```
+
+**Note:** `npm start` starts the full stack (backend + frontend + ngrok) by default. If you only need the backend server, use `npm run start:backend` instead.
 
 ### 4. Configure Your IDE
 
@@ -348,10 +366,10 @@ Or visit the web dashboard at `http://localhost:3030`
 **Development mode with auto-reload:**
 
 ```bash
-npm run dev              # Backend only
-npm run dev:ngrok        # Backend with ngrok
-npm run dev:all          # Backend + frontend
-npm run dev:full         # Backend + frontend + ngrok
+npm run dev              # Full stack (backend + frontend + ngrok) - default
+npm run dev:ngrok        # Backend with ngrok only
+npm run dev:all          # Backend + frontend (without ngrok)
+npm run dev:full         # Full stack (backend + frontend + ngrok) - same as dev
 ```
 
 ## Testing
@@ -359,12 +377,14 @@ npm run dev:full         # Backend + frontend + ngrok
 Run the test suite (requires server running):
 
 ```bash
-# Start server in one terminal
-npm start
+# Start server in one terminal (backend only for testing)
+npm run start:backend
 
 # Run tests in another terminal
 npm test
 ```
+
+**Note:** For testing, you typically only need the backend server. Use `npm run start:backend` instead of `npm start` to avoid starting frontend and ngrok unnecessarily.
 
 Individual tests:
 
@@ -418,7 +438,7 @@ npm run accounts
 
 ### Cursor IDE Not Connecting
 
-1. **Make sure ngrok is running**: Cursor IDE requires ngrok tunnel due to CSRF protection. Use `npm run start:ngrok` or ensure ngrok is started separately
+1. **Make sure ngrok is running**: Cursor IDE requires ngrok tunnel due to CSRF protection. The default `npm start` command includes ngrok, or use `npm run start:ngrok` for backend + ngrok only
 2. Verify the server is running: `curl http://localhost:8080/health`
 3. Check the API key matches in Cursor settings
 4. Ensure the base URL uses the ngrok HTTPS URL (not localhost)

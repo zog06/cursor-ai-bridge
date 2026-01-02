@@ -12,9 +12,10 @@
     "bin"
   ],
   "scripts": {
-    "start": "node src/index.js",
+    "start": "npx concurrently \"npm run start:ngrok\" \"cd frontend && npm run dev\" --names \"backend,frontend\" --prefix-colors \"blue,green\"",
+    "start:backend": "node src/index.js",
     "start:ngrok": "node src/index.js --ngrok",
-    "start:all": "npx concurrently \"npm run start\" \"cd frontend && npm run dev\" --names \"backend,frontend\" --prefix-colors \"blue,green\"",
+    "start:all": "npx concurrently \"npm run start:backend\" \"cd frontend && npm run dev\" --names \"backend,frontend\" --prefix-colors \"blue,green\"",
     "start:full": "npx concurrently \"npm run start:ngrok\" \"cd frontend && npm run dev\" --names \"backend,frontend\" --prefix-colors \"blue,green\"",
     "dev": "node --watch src/index.js",
     "dev:ngrok": "node --watch src/index.js --ngrok",
