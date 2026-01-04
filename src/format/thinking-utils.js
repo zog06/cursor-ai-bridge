@@ -73,8 +73,10 @@ export function sanitizeAnthropicThinkingBlock(block) {
 
 /**
  * Filter content array, keeping only thinking blocks with valid signatures.
+ * @param {Array} contentArray - Array of content parts
+ * @param {boolean} isGeminiModel - Whether this is for a Gemini model
  */
-function filterContentArray(contentArray) {
+function filterContentArray(contentArray, isGeminiModel = false) {
     const filtered = [];
 
     for (const item of contentArray) {
@@ -88,14 +90,24 @@ function filterContentArray(contentArray) {
             continue;
         }
 
+        // Check signature validity based on model type
+        let hasValidSig = false;
+        if (isGeminiModel) {
+            // For Gemini, check both thoughtSignature (Gemini format) and signature (Anthropic format)
+            const sig = item.thoughtSignature || item.signature;
+            hasValidSig = isValidGeminiSignature(sig);
+        } else {
+            // For Claude, use standard validation
+            hasValidSig = hasValidSignature(item);
+        }
+
         // Keep items with valid signatures
-        if (hasValidSignature(item)) {
+        if (hasValidSig) {
             filtered.push(sanitizeThinkingPart(item));
             continue;
         }
 
         // Drop unsigned thinking blocks
-        console.log('[ThinkingUtils] Dropping unsigned thinking block');
     }
 
     return filtered;
@@ -105,14 +117,15 @@ function filterContentArray(contentArray) {
  * Filter unsigned thinking blocks from contents (Gemini format)
  *
  * @param {Array<{role: string, parts: Array}>} contents - Array of content objects in Gemini format
+ * @param {boolean} isGeminiModel - Whether this is for a Gemini model (optional, defaults to false for backward compatibility)
  * @returns {Array<{role: string, parts: Array}>} Filtered contents with unsigned thinking blocks removed
  */
-export function filterUnsignedThinkingBlocks(contents) {
+export function filterUnsignedThinkingBlocks(contents, isGeminiModel = false) {
     return contents.map(content => {
         if (!content || typeof content !== 'object') return content;
 
         if (Array.isArray(content.parts)) {
-            return { ...content, parts: filterContentArray(content.parts) };
+            return { ...content, parts: filterContentArray(content.parts, isGeminiModel) };
         }
 
         return content;
@@ -124,9 +137,10 @@ export function filterUnsignedThinkingBlocks(contents) {
  * Claude/Gemini APIs require that assistant messages don't end with unsigned thinking blocks.
  *
  * @param {Array<Object>} content - Array of content blocks
+ * @param {boolean} isGeminiModel - Whether this is for a Gemini model
  * @returns {Array<Object>} Content array with trailing unsigned thinking blocks removed
  */
-export function removeTrailingThinkingBlocks(content) {
+export function removeTrailingThinkingBlocks(content, isGeminiModel = false) {
     if (!Array.isArray(content)) return content;
     if (content.length === 0) return content;
 
@@ -140,8 +154,15 @@ export function removeTrailingThinkingBlocks(content) {
         const isThinking = isThinkingPart(block);
 
         if (isThinking) {
-            // Check if it has a valid signature
-            if (!hasValidSignature(block)) {
+            // For Gemini, check with Gemini-specific signature validation
+            let hasValidSig = false;
+            if (isGeminiModel) {
+                hasValidSig = isValidGeminiSignature(block.signature);
+            } else {
+                hasValidSig = hasValidSignature(block);
+            }
+
+            if (!hasValidSig) {
                 endIndex = i;
             } else {
                 break; // Stop at signed thinking block
@@ -152,11 +173,28 @@ export function removeTrailingThinkingBlocks(content) {
     }
 
     if (endIndex < content.length) {
-        console.log('[ThinkingUtils] Removed', content.length - endIndex, 'trailing unsigned thinking blocks');
         return content.slice(0, endIndex);
     }
 
     return content;
+}
+
+/**
+ * Check if a signature is valid for Gemini models
+ * Gemini accepts placeholder signatures like 'gemini-thinking-no-signature'
+ * @param {string} signature - Signature to check
+ * @returns {boolean} True if signature is valid for Gemini
+ */
+function isValidGeminiSignature(signature) {
+    if (!signature || typeof signature !== 'string') return false;
+    // Gemini accepts placeholder signatures
+    if (signature === 'gemini-thinking-no-signature' || 
+        signature === 'gemini-synthetic-thinking-for-tool-use' ||
+        signature.startsWith('gemini-')) {
+        return true;
+    }
+    // Also accept signatures that meet minimum length
+    return signature.length >= MIN_SIGNATURE_LENGTH;
 }
 
 /**
@@ -165,9 +203,10 @@ export function removeTrailingThinkingBlocks(content) {
  * Also sanitizes blocks to remove extra fields like cache_control.
  *
  * @param {Array<Object>} content - Array of content blocks
+ * @param {boolean} isGeminiModel - Whether this is for a Gemini model
  * @returns {Array<Object>} Filtered content with only valid signed thinking blocks
  */
-export function restoreThinkingSignatures(content) {
+export function restoreThinkingSignatures(content, isGeminiModel = false) {
     if (!Array.isArray(content)) return content;
 
     const originalLength = content.length;
@@ -179,15 +218,22 @@ export function restoreThinkingSignatures(content) {
             continue;
         }
 
-        // Keep blocks with valid signatures (>= MIN_SIGNATURE_LENGTH chars), sanitized
-        if (block.signature && block.signature.length >= MIN_SIGNATURE_LENGTH) {
-            filtered.push(sanitizeAnthropicThinkingBlock(block));
+        // For Gemini models, accept placeholder signatures
+        if (isGeminiModel) {
+            if (isValidGeminiSignature(block.signature)) {
+                filtered.push(sanitizeAnthropicThinkingBlock(block));
+            }
+            // Drop unsigned thinking blocks for Gemini too
+        } else {
+            // For Claude models, require valid signatures (>= MIN_SIGNATURE_LENGTH chars)
+            if (block.signature && block.signature.length >= MIN_SIGNATURE_LENGTH) {
+                filtered.push(sanitizeAnthropicThinkingBlock(block));
+            }
+            // Unsigned thinking blocks are dropped
         }
-        // Unsigned thinking blocks are dropped
     }
 
     if (filtered.length < originalLength) {
-        console.log(`[ThinkingUtils] Dropped ${originalLength - filtered.length} unsigned thinking block(s)`);
     }
 
     return filtered;
@@ -241,7 +287,6 @@ export function reorderAssistantContent(content) {
     }
 
     if (droppedEmptyBlocks > 0) {
-        console.log(`[ThinkingUtils] Dropped ${droppedEmptyBlocks} empty text block(s)`);
     }
 
     const reordered = [...thinkingBlocks, ...textBlocks, ...toolUseBlocks];
@@ -250,9 +295,6 @@ export function reorderAssistantContent(content) {
     if (reordered.length === content.length) {
         const originalOrder = content.map(b => b?.type || 'unknown').join(',');
         const newOrder = reordered.map(b => b?.type || 'unknown').join(',');
-        if (originalOrder !== newOrder) {
-            console.log('[ThinkingUtils] Reordered assistant content');
-        }
     }
 
     return reordered;
@@ -268,18 +310,25 @@ export function reorderAssistantContent(content) {
  * that will be dropped later.
  *
  * @param {Object} message - Message to check
+ * @param {boolean} isGeminiModel - Whether this is for a Gemini model (optional)
  * @returns {boolean} True if message has valid signed thinking blocks
  */
-function messageHasValidThinking(message) {
+function messageHasValidThinking(message, isGeminiModel = false) {
     const content = message.content || message.parts || [];
     if (!Array.isArray(content)) return false;
     return content.some(block => {
         if (!isThinkingPart(block)) return false;
-        // Check for valid signature (Anthropic style)
-        if (block.signature && block.signature.length >= MIN_SIGNATURE_LENGTH) return true;
-        // Check for thoughtSignature (Gemini style on functionCall)
-        if (block.thoughtSignature && block.thoughtSignature.length >= MIN_SIGNATURE_LENGTH) return true;
-        return false;
+        
+        // Get signature from either location
+        const signature = block.signature || block.thoughtSignature;
+        
+        if (isGeminiModel) {
+            // For Gemini, accept placeholder signatures
+            return isValidGeminiSignature(signature);
+        } else {
+            // For Claude, require minimum length
+            return signature && signature.length >= MIN_SIGNATURE_LENGTH;
+        }
     });
 }
 
@@ -331,9 +380,10 @@ function isPlainUserMessage(message) {
  * 2. Interrupted tool: assistant has tool_use followed by plain user message (interrupted)
  *
  * @param {Array<Object>} messages - Array of messages
+ * @param {boolean} isGeminiModel - Whether this is for a Gemini model (optional)
  * @returns {Object} State object with inToolLoop, interruptedTool, turnHasThinking, etc.
  */
-export function analyzeConversationState(messages) {
+export function analyzeConversationState(messages, isGeminiModel = false) {
     if (!Array.isArray(messages) || messages.length === 0) {
         return { inToolLoop: false, interruptedTool: false, turnHasThinking: false, toolResultCount: 0 };
     }
@@ -353,7 +403,7 @@ export function analyzeConversationState(messages) {
 
     const lastAssistant = messages[lastAssistantIdx];
     const hasToolUse = messageHasToolUse(lastAssistant);
-    const hasThinking = messageHasValidThinking(lastAssistant);
+    const hasThinking = messageHasValidThinking(lastAssistant, isGeminiModel);
 
     // Count trailing tool results after the assistant message
     let toolResultCount = 0;
@@ -390,11 +440,19 @@ export function analyzeConversationState(messages) {
  * 2. We have an interrupted tool with no valid thinking blocks
  *
  * @param {Array<Object>} messages - Array of messages
+ * @param {boolean} isGeminiModel - Whether this is for a Gemini model (optional)
  * @returns {boolean} True if thinking recovery is needed
  */
-export function needsThinkingRecovery(messages) {
-    const state = analyzeConversationState(messages);
+export function needsThinkingRecovery(messages, isGeminiModel = false) {
+    const state = analyzeConversationState(messages, isGeminiModel);
+
+    // Recovery is needed ONLY if the model is stuck in a loop or interrupted state
+    // We do NOT want to trigger this just for missing thoughts in history (e.g. from OpenAI)
+    // because that forces "Textify" mode, causing the model to learn/mimic the log format.
+    // Since we fixed openai-converter.js to preserve tool_use/tool_result, safe native history is preferred.
+
     // Need recovery if (tool loop OR interrupted tool) AND no thinking
+    // (This covers the active turn case)
     return (state.inToolLoop || state.interruptedTool) && !state.turnHasThinking;
 }
 
@@ -422,60 +480,75 @@ function stripAllThinkingBlocks(messages) {
 }
 
 /**
- * Close tool loop by injecting synthetic messages.
- * This allows the model to start a fresh turn when thinking is corrupted.
- *
- * When thinking blocks are stripped (no valid signatures) and we're in the
- * middle of a tool loop OR have an interrupted tool, the conversation is in
- * a corrupted state. This function injects synthetic messages to close the
- * loop and allow the model to continue.
+ * Close tool loop by converting corrupted tool history to text.
+ * 
+ * @deprecated This function is disabled - we no longer convert tool_use/tool_result to text.
+ * With proper signature handling, thinking blocks are preserved correctly
+ * and tool_use/tool_result blocks remain in their native format.
+ * The system works professionally with native tool formats only.
  *
  * @param {Array<Object>} messages - Array of messages
- * @returns {Array<Object>} Modified messages with synthetic messages injected
+ * @returns {Array<Object>} Modified messages with tool history converted to text
  */
 export function closeToolLoopForThinking(messages) {
     const state = analyzeConversationState(messages);
 
-    // Handle neither tool loop nor interrupted tool
+    // If no tool loop/interruption detected, return as is
     if (!state.inToolLoop && !state.interruptedTool) return messages;
 
-    // Strip all thinking blocks
-    let modified = stripAllThinkingBlocks(messages);
+    return messages.map(msg => {
+        const content = msg.content || msg.parts;
+        if (!Array.isArray(content)) return msg;
 
-    if (state.interruptedTool) {
-        // For interrupted tools: just strip thinking and add a synthetic assistant message
-        // to acknowledge the interruption before the user's new message
+        // Map content blocks to text if they are tool-related
+        const newContent = content.map(block => {
+            // Convert tool_use to text
+            if (block.type === 'tool_use') {
+                const toolName = block.name || 'unknown_tool';
+                const inputStr = JSON.stringify(block.input || {});
+                return {
+                    type: 'text',
+                    text: `>>> PAST_TOOL_ACTION: Executed tool '${toolName}' with input: ${inputStr} <<<`
+                };
+            }
 
-        // Find where to insert the synthetic message (before the plain user message)
-        const insertIdx = state.lastAssistantIdx + 1;
+            // Convert tool_result to text
+            if (block.type === 'tool_result') {
+                const toolName = block.name || block.tool_use_id || 'unknown_tool';
+                let resultText = '';
+                if (typeof block.content === 'string') {
+                    resultText = block.content;
+                } else if (Array.isArray(block.content)) {
+                    // Flatten array content
+                    resultText = block.content
+                        .map(c => c.type === 'text' ? c.text : '[Non-text content]')
+                        .join('\n');
+                }
+                return {
+                    type: 'text',
+                    text: `>>> PAST_TOOL_OUTPUT: Tool '${toolName}' returned: ${resultText} <<<`
+                };
+            }
 
-        // Insert synthetic assistant message acknowledging interruption
-        modified.splice(insertIdx, 0, {
-            role: 'assistant',
-            content: [{ type: 'text', text: '[Tool call was interrupted.]' }]
-        });
+            // Filter out thinking blocks (as they are likely invalid)
+            if (isThinkingPart(block)) {
+                return null; // Will be filtered out
+            }
 
-        console.log('[ThinkingUtils] Applied thinking recovery for interrupted tool');
-    } else {
-        // For tool loops: add synthetic messages to close the loop
-        const syntheticText = state.toolResultCount === 1
-            ? '[Tool execution completed.]'
-            : `[${state.toolResultCount} tool executions completed.]`;
+            return block;
+        }).filter(Boolean); // Remove nulls
 
-        // Inject synthetic model message to complete the turn
-        modified.push({
-            role: 'assistant',
-            content: [{ type: 'text', text: syntheticText }]
-        });
+        // Ensure message isn't empty
+        if (newContent.length === 0) {
+            newContent.push({ type: 'text', text: '[Empty message converted during recovery]' });
+        }
 
-        // Inject synthetic user message to start fresh
-        modified.push({
-            role: 'user',
-            content: [{ type: 'text', text: '[Continue]' }]
-        });
-
-        console.log('[ThinkingUtils] Applied thinking recovery for tool loop');
-    }
-
-    return modified;
+        // Return updated message structure
+        if (msg.content) {
+            return { ...msg, content: newContent };
+        } else {
+            return { ...msg, parts: newContent };
+        }
+    });
 }
+

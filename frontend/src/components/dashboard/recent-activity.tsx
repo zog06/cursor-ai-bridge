@@ -44,9 +44,16 @@ export function RecentActivity({ requests }: RecentActivityProps) {
                   </Badge>
                   <code className="text-xs truncate">{request.path}</code>
                   {request.model && (
-                    <span className="text-xs text-muted-foreground truncate">
-                      {request.model}
-                    </span>
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-xs text-muted-foreground truncate">
+                        {request.model}
+                      </span>
+                      {request.account && (
+                        <Badge variant="secondary" className="text-[10px] py-0 h-4 font-normal bg-muted/50 text-muted-foreground border-border/50 shrink-0">
+                          {request.account.split('@')[0]}
+                        </Badge>
+                      )}
+                    </div>
                   )}
                 </div>
                 <div className="flex items-center gap-3 shrink-0">

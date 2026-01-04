@@ -16,6 +16,7 @@ import {
     MAX_RETRIES,
     MAX_WAIT_BEFORE_ERROR_MS,
     MIN_SIGNATURE_LENGTH,
+    normalizeModelName,
     getModelFamily,
     isThinkingModel
 } from './constants.js';
@@ -26,6 +27,7 @@ import {
 import { cacheSignature } from './format/signature-cache.js';
 import { formatDuration, sleep } from './utils/helpers.js';
 import { isRateLimitError, isAuthError } from './errors.js';
+import { logDebugFile, logToolUsage } from './utils/logger.js';
 
 /**
  * Check if an error is a rate limit error (429 or RESOURCE_EXHAUSTED)
@@ -206,8 +208,12 @@ function parseResetTime(responseOrError, errorText = '') {
  * Build the wrapped request body for Cloud Code API
  */
 function buildCloudCodeRequest(anthropicRequest, projectId) {
-    const model = anthropicRequest.model;
-    const { googleRequest, toolMetadata } = convertAnthropicToGoogle(anthropicRequest);
+    // Normalize model name (strip "antigravity-" prefix if present)
+    const model = normalizeModelName(anthropicRequest.model);
+    const { googleRequest, toolMetadata } = convertAnthropicToGoogle({
+        ...anthropicRequest,
+        model // Use normalized model name
+    });
 
     // Use stable session ID derived from first user message for cache continuity
     googleRequest.sessionId = deriveSessionId(anthropicRequest);
@@ -262,7 +268,7 @@ function buildHeaders(token, model, accept = 'application/json') {
  * @throws {Error} If max retries exceeded or no accounts available
  */
 export async function sendMessage(anthropicRequest, accountManager) {
-    const model = anthropicRequest.model;
+    const model = normalizeModelName(anthropicRequest.model);
     const isThinking = isThinkingModel(model);
 
     // Retry loop with account failover
@@ -278,9 +284,6 @@ export async function sendMessage(anthropicRequest, accountManager) {
         // Handle waiting for sticky account
         if (!account && waitMs > 0) {
             // Silent wait for sticky account (only log if wait is significant)
-            if (waitMs > 30000) {
-                console.log(`[CloudCode] Waiting ${formatDuration(waitMs)} for sticky account...`);
-            }
             await sleep(waitMs);
             accountManager.clearExpiredLimits();
             account = accountManager.getCurrentStickyAccount();
@@ -301,7 +304,6 @@ export async function sendMessage(anthropicRequest, accountManager) {
 
                 // Wait for reset (applies to both single and multi-account modes)
                 const accountCount = accountManager.getAccountCount();
-                console.log(`[CloudCode] All ${accountCount} account(s) rate-limited. Waiting ${formatDuration(allWaitMs)}...`);
                 await sleep(allWaitMs);
                 accountManager.clearExpiredLimits();
                 account = accountManager.pickNext();
@@ -325,11 +327,37 @@ export async function sendMessage(anthropicRequest, accountManager) {
 
             // Try each endpoint
             let lastError = null;
+            const isClaudeModel = (anthropicRequest.model || '').toLowerCase().includes('claude');
             for (const endpoint of ANTIGRAVITY_ENDPOINT_FALLBACKS) {
                 try {
+                    // CRITICAL: Log Google request for Claude tool usage debugging
+                    // Log before first request attempt
+                    if (isClaudeModel && payload.request?.tools && endpoint === ANTIGRAVITY_ENDPOINT_FALLBACKS[0]) {
+                        try {
+                            logToolUsage(payload.requestId || 'unknown', 'google-request', {
+                                googleRequest: payload.request,
+                                endpoint: endpoint,
+                                account: account.email,
+                                stream: false
+                            }, anthropicRequest.model);
+                        } catch (err) {
+                            console.error('[CloudCode] Failed to log Google request:', err);
+                        }
+                    }
+
                     const url = isThinking
                         ? `${endpoint}/v1internal:streamGenerateContent?alt=sse`
                         : `${endpoint}/v1internal:generateContent`;
+
+                    /* DEBUG: Log full request for Gemini loop debugging
+                    if (payload.request.contents && payload.request.contents.length > 0) {
+                        try {
+                            logDebugFile('gemini-req', payload.requestId, payload.request.contents);
+                        } catch (err) {
+                            console.error('Failed to log request:', err);
+                        }
+                    }
+                    */
 
                     const response = await fetch(url, {
                         method: 'POST',
@@ -341,6 +369,11 @@ export async function sendMessage(anthropicRequest, accountManager) {
                         const errorText = await response.text();
                         const shortError = errorText.length > 200 ? errorText.substring(0, 200) + '...' : errorText;
                         console.log(`[CloudCode] Error at ${endpoint}: ${response.status} - ${shortError}`);
+
+                        // Log full error for invalid tool/argument errors
+                        if (errorText.includes('invalid') && (errorText.includes('tool') || errorText.includes('argument'))) {
+                            console.log(`[CloudCode] FULL ERROR TEXT (invalid tool/argument): ${errorText}`);
+                        }
 
                         if (response.status === 401) {
                             // Auth error - clear caches and retry with fresh token
@@ -369,13 +402,40 @@ export async function sendMessage(anthropicRequest, accountManager) {
 
                     // For thinking models, parse SSE and accumulate all parts
                     if (isThinking) {
-                        return await parseThinkingSSEResponse(response, anthropicRequest.model);
+                        const responseData = await parseThinkingSSEResponse(response, anthropicRequest.model);
+                        return { ...responseData, _account: account.email };
                     }
 
                     // Non-thinking models use regular JSON
                     const data = await response.json();
+
+                    // CRITICAL: Log Google response for Claude tool usage debugging
+                    if (isClaudeModel && payload.request?.tools) {
+                        try {
+                            logToolUsage(payload.requestId || 'unknown', 'google-response', {
+                                googleResponse: data,
+                                endpoint: endpoint,
+                                account: account.email,
+                                status: response.status
+                            }, anthropicRequest.model);
+                        } catch (err) {
+                            console.error('[CloudCode] Failed to log Google response:', err);
+                        }
+                    }
+
+                    /*
+                    try {
+                        logDebugFile('gemini-res', payload.requestId, data);
+                    } catch (err) {
+                        console.error('Failed to log response:', err);
+                    }
+                    */
+
                     // Response received successfully (no logging needed)
-                    return convertGoogleToAnthropic(data, anthropicRequest.model);
+                    return {
+                        ...convertGoogleToAnthropic(data, anthropicRequest.model),
+                        _account: account.email
+                    };
 
                 } catch (endpointError) {
                     if (is429Error(endpointError)) {
@@ -496,8 +556,8 @@ async function parseThinkingSSEResponse(response, originalModel) {
                     }
                 }
             } catch (e) {
-                    console.log('[CloudCode] SSE parse warning:', e.message, 'Raw:', jsonText.slice(0, 100));
-                }
+                console.log('[CloudCode] SSE parse warning:', e.message, 'Raw:', jsonText.slice(0, 100));
+            }
         }
     }
 
@@ -505,16 +565,14 @@ async function parseThinkingSSEResponse(response, originalModel) {
     flushText();
 
     const accumulatedResponse = {
-        candidates: [{ content: { parts: finalParts }, finishReason }],
-        usageMetadata
+        candidates: [{
+            content: {
+                parts: finalParts
+            },
+            finishReason: finishReason
+        }],
+        usageMetadata: usageMetadata
     };
-
-    const partTypes = finalParts.map(p => p.thought ? 'thought' : (p.functionCall ? 'functionCall' : 'text'));
-    console.log('[CloudCode] Response received (SSE), part types:', partTypes);
-    if (finalParts.some(p => p.thought)) {
-        const thinkingPart = finalParts.find(p => p.thought);
-        console.log('[CloudCode] Thinking signature length:', thinkingPart?.thoughtSignature?.length || 0);
-    }
 
     return convertGoogleToAnthropic(accumulatedResponse, originalModel);
 }
@@ -533,7 +591,7 @@ async function parseThinkingSSEResponse(response, originalModel) {
  * @throws {Error} If max retries exceeded or no accounts available
  */
 export async function* sendMessageStream(anthropicRequest, accountManager) {
-    const model = anthropicRequest.model;
+    const model = normalizeModelName(anthropicRequest.model);
 
     // Retry loop with account failover
     // Ensure we try at least as many times as there are accounts to cycle through everyone
@@ -548,9 +606,6 @@ export async function* sendMessageStream(anthropicRequest, accountManager) {
         // Handle waiting for sticky account
         if (!account && waitMs > 0) {
             // Silent wait for sticky account (only log if wait is significant)
-            if (waitMs > 30000) {
-                console.log(`[CloudCode] Waiting ${formatDuration(waitMs)} for sticky account...`);
-            }
             await sleep(waitMs);
             accountManager.clearExpiredLimits();
             account = accountManager.getCurrentStickyAccount();
@@ -571,7 +626,6 @@ export async function* sendMessageStream(anthropicRequest, accountManager) {
 
                 // Wait for reset (applies to both single and multi-account modes)
                 const accountCount = accountManager.getAccountCount();
-                console.log(`[CloudCode] All ${accountCount} account(s) rate-limited. Waiting ${formatDuration(allWaitMs)}...`);
                 await sleep(allWaitMs);
                 accountManager.clearExpiredLimits();
                 account = accountManager.pickNext();
@@ -595,8 +649,24 @@ export async function* sendMessageStream(anthropicRequest, accountManager) {
 
             // Try each endpoint for streaming
             let lastError = null;
+            const isClaudeModel = (anthropicRequest.model || '').toLowerCase().includes('claude');
             for (const endpoint of ANTIGRAVITY_ENDPOINT_FALLBACKS) {
                 try {
+                    // CRITICAL: Log Google request for Claude tool usage debugging (Streaming)
+                    // Log before first request attempt
+                    if (isClaudeModel && payload.request?.tools && endpoint === ANTIGRAVITY_ENDPOINT_FALLBACKS[0]) {
+                        try {
+                            logToolUsage(payload.requestId || 'unknown', 'google-request', {
+                                googleRequest: payload.request,
+                                endpoint: endpoint,
+                                account: account.email,
+                                stream: true
+                            }, anthropicRequest.model);
+                        } catch (err) {
+                            console.error('[CloudCode] Failed to log streaming Google request:', err);
+                        }
+                    }
+
                     const url = `${endpoint}/v1internal:streamGenerateContent?alt=sse`;
 
                     const response = await fetch(url, {
@@ -605,9 +675,27 @@ export async function* sendMessageStream(anthropicRequest, accountManager) {
                         body: JSON.stringify(payload)
                     });
 
+                    /* DEBUG: Log full request for Gemini loop debugging (Streaming)
+                    if (payload.request.contents && payload.request.contents.length > 0) {
+                        try {
+                            logDebugFile('gemini-req-stream', payload.requestId, payload.request.contents);
+                        } catch (err) {
+                            console.error('Failed to log streaming request:', err);
+                        }
+                    }
+                    */
+
                     if (!response.ok) {
                         const errorText = await response.text();
-                        console.log(`[CloudCode] Stream error at ${endpoint}: ${response.status} - ${errorText}`);
+                        const shortError = errorText.length > 200 ? errorText.substring(0, 200) + '...' : errorText;
+                        console.log(`[CloudCode] Stream error at ${endpoint}: ${response.status} - ${shortError}`);
+
+                        // Log full error for invalid tool/argument errors
+                        if (errorText.includes('invalid') && (errorText.includes('tool') || errorText.includes('argument') || errorText.includes('call'))) {
+                            console.log(`[CloudCode] FULL STREAM ERROR TEXT (invalid tool/argument): ${errorText}`);
+                            // Also log the request payload for debugging
+                            console.log(`[CloudCode] Request payload tools: ${JSON.stringify(payload.request?.tools || 'none').substring(0, 500)}`);
+                        }
 
                         if (response.status === 401) {
                             // Auth error - clear caches and retry
@@ -632,6 +720,7 @@ export async function* sendMessageStream(anthropicRequest, accountManager) {
                     }
 
                     // Stream the response - yield events as they arrive
+                    yield { type: 'internal_metadata', account: account.email };
                     yield* streamSSEResponse(response, anthropicRequest.model);
 
                     // Stream completed successfully (no logging needed)
@@ -786,6 +875,19 @@ async function* streamSSEResponse(response, originalModel) {
                             continue;
                         }
 
+                        // SAFETY FILTER: Block "Textify" tags from reaching the user
+                        // The model might mimic these tags if it sees them in history.
+                        // We must strip them to prevent the user from seeing internal logs.
+                        const trimmedText = part.text.trim();
+                        if (trimmedText.includes('>>> PAST_TOOL_ACTION') ||
+                            trimmedText.includes('>>> PAST_TOOL_RESULT') ||
+                            trimmedText.includes('>>> PAST_TOOL_USAGE') ||
+                            trimmedText.includes('} <<<') || // Fragmented end tag
+                            (trimmedText.includes('with input:') && trimmedText.includes('tool'))) { // Leaked tool action description
+
+                            continue;
+                        }
+
                         // Handle regular text
                         if (currentBlockType !== 'text') {
                             if (currentBlockType === 'thinking' && currentThinkingSignature) {
@@ -837,13 +939,37 @@ async function* streamSSEResponse(response, originalModel) {
 
                         const toolId = part.functionCall.id || `toolu_${crypto.randomBytes(12).toString('hex')}`;
 
+                        // CRITICAL FIX: Validate and sanitize args to prevent "invalid arguments" errors
+                        let args = part.functionCall.args || {};
+                        
+                        // Ensure args is always a plain object, not null/undefined/string/array
+                        if (typeof args === 'string') {
+                            try {
+                                args = JSON.parse(args);
+                            } catch (e) {
+                                console.warn(`[CloudCode] Failed to parse streaming tool call args as JSON for "${part.functionCall.name}", using empty object: ${e.message}`);
+                                args = {};
+                            }
+                        } else if (!args || typeof args !== 'object' || Array.isArray(args)) {
+                            console.warn(`[CloudCode] Invalid streaming tool call args type (${typeof args}) for "${part.functionCall.name}", using empty object`);
+                            args = {};
+                        }
+                        
+                        // Remove any non-serializable values (functions, undefined, circular refs, etc.)
+                        try {
+                            JSON.stringify(args);
+                        } catch (e) {
+                            console.warn(`[CloudCode] Streaming tool call args for "${part.functionCall.name}" contains non-serializable values, using empty object: ${e.message}`);
+                            args = {};
+                        }
+
                         // For Gemini, include the thoughtSignature in the tool_use block
                         // so it can be sent back in subsequent requests
                         const toolUseBlock = {
                             type: 'tool_use',
                             id: toolId,
                             name: part.functionCall.name,
-                            input: {}
+                            input: args
                         };
 
                         // Store the signature in the tool_use block for later retrieval
@@ -864,7 +990,7 @@ async function* streamSSEResponse(response, originalModel) {
                             index: blockIndex,
                             delta: {
                                 type: 'input_json_delta',
-                                partial_json: JSON.stringify(part.functionCall.args || {})
+                                partial_json: JSON.stringify(args)
                             }
                         };
                     }

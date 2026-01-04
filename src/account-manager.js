@@ -133,11 +133,11 @@ export class AccountManager {
     }
 
     /**
-     * Get list of available (non-rate-limited, non-invalid) accounts
+     * Get list of available (non-rate-limited, non-invalid, non-disabled) accounts
      * @returns {Array<Object>} Array of available account objects
      */
     getAvailableAccounts() {
-        return this.#accounts.filter(acc => !acc.isRateLimited && !acc.isInvalid);
+        return this.#accounts.filter(acc => !acc.isDisabled && !acc.isRateLimited && !acc.isInvalid);
     }
 
     /**
@@ -211,7 +211,7 @@ export class AccountManager {
             const idx = (this.#currentIndex + i) % this.#accounts.length;
             const account = this.#accounts[idx];
 
-            if (!account.isRateLimited && !account.isInvalid) {
+            if (!account.isDisabled && !account.isRateLimited && !account.isInvalid) {
                 // Set activeIndex to this account (not +1)
                 this.#currentIndex = idx;
                 account.lastUsed = Date.now();
@@ -251,7 +251,7 @@ export class AccountManager {
         const account = this.#accounts[this.#currentIndex];
 
         // Return if available
-        if (account && !account.isRateLimited && !account.isInvalid) {
+        if (account && !account.isDisabled && !account.isRateLimited && !account.isInvalid) {
             account.lastUsed = Date.now();
             // Persist the change (don't await to avoid blocking)
             this.saveToDisk();
@@ -279,7 +279,7 @@ export class AccountManager {
         // Get current account directly (activeIndex = current account)
         const account = this.#accounts[this.#currentIndex];
 
-        if (!account || account.isInvalid) {
+        if (!account || account.isDisabled || account.isInvalid) {
             return { shouldWait: false, waitMs: 0, account: null };
         }
 
@@ -563,6 +563,7 @@ export class AccountManager {
                     rateLimitResetTime: acc.rateLimitResetTime,
                     isInvalid: acc.isInvalid || false,
                     invalidReason: acc.invalidReason || null,
+                    isDisabled: acc.isDisabled || false,
                     lastUsed: acc.lastUsed
                 })),
                 settings: this.#settings,
@@ -576,6 +577,23 @@ export class AccountManager {
     }
 
     /**
+     * Toggle an account's disabled status
+     * @param {string} email - Account email to toggle
+     * @param {boolean} disabled - Whether to disable the account
+     * @returns {boolean} True if account was found and toggled
+     */
+    toggleAccount(email, disabled) {
+        const account = this.#accounts.find(acc => acc.email === email);
+        if (account) {
+            account.isDisabled = !!disabled;
+            console.log(`[AccountManager] Account ${email} is now ${disabled ? 'DISABLED' : 'ENABLED'}`);
+            this.saveToDisk();
+            return true;
+        }
+        return false;
+    }
+
+    /**
      * Get status object for logging/API
      * @returns {{accounts: Array, settings: Object}} Status object with accounts and settings
      */
@@ -583,13 +601,15 @@ export class AccountManager {
         const available = this.getAvailableAccounts();
         const rateLimited = this.#accounts.filter(a => a.isRateLimited);
         const invalid = this.getInvalidAccounts();
+        const disabled = this.#accounts.filter(a => a.isDisabled);
 
         return {
             total: this.#accounts.length,
             available: available.length,
             rateLimited: rateLimited.length,
             invalid: invalid.length,
-            summary: `${this.#accounts.length} total, ${available.length} available, ${rateLimited.length} rate-limited, ${invalid.length} invalid`,
+            disabled: disabled.length,
+            summary: `${this.#accounts.length} total, ${available.length} available, ${rateLimited.length} rate-limited, ${invalid.length} invalid, ${disabled.length} disabled`,
             accounts: this.#accounts.map(a => ({
                 email: a.email,
                 source: a.source,
@@ -597,6 +617,7 @@ export class AccountManager {
                 rateLimitResetTime: a.rateLimitResetTime,
                 isInvalid: a.isInvalid || false,
                 invalidReason: a.invalidReason || null,
+                isDisabled: a.isDisabled || false,
                 lastUsed: a.lastUsed
             }))
         };
@@ -617,6 +638,46 @@ export class AccountManager {
      */
     getAllAccounts() {
         return this.#accounts;
+    }
+
+    /**
+     * Add a new account and save to disk
+     * @param {Object} accountData - Account data to add
+     * @returns {Promise<boolean>} True if added, false if updated existing
+     */
+    async addAccount(accountData) {
+        const existingIndex = this.#accounts.findIndex(a => a.email === accountData.email);
+        
+        const newAccount = {
+            ...accountData,
+            source: 'oauth', // Force oauth source for added accounts
+            isRateLimited: false,
+            rateLimitResetTime: null,
+            lastUsed: null,
+            isInvalid: false,
+            invalidReason: null,
+            isDisabled: false
+        };
+
+        if (existingIndex >= 0) {
+            // Update existing
+            this.#accounts[existingIndex] = {
+                ...this.#accounts[existingIndex],
+                ...newAccount,
+                // Preserve stats if needed, but usually a re-add means refresh
+                addedAt: new Date().toISOString()
+            };
+            console.log(`[AccountManager] Updated existing account: ${newAccount.email}`);
+            await this.saveToDisk();
+            return false;
+        } else {
+            // Add new
+            newAccount.addedAt = new Date().toISOString();
+            this.#accounts.push(newAccount);
+            console.log(`[AccountManager] Added new account: ${newAccount.email}`);
+            await this.saveToDisk();
+            return true;
+        }
     }
 }
 

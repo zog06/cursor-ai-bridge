@@ -381,7 +381,7 @@ function moveConstraintsToDescription(schema) {
     if (Array.isArray(schema)) return schema.map(moveConstraintsToDescription);
 
     const CONSTRAINTS = ['minLength', 'maxLength', 'pattern', 'minimum', 'maximum',
-                         'minItems', 'maxItems', 'format'];
+        'minItems', 'maxItems', 'format'];
 
     let result = { ...schema };
 
@@ -479,6 +479,190 @@ function flattenTypeArrays(schema, nullableProps = null, currentPropName = null)
     }
 
     return result;
+}
+
+/**
+ * Sanitize JSON Schema for Claude models (minimal sanitization).
+ * Preserves most JSON Schema features to avoid "invalid arguments" errors.
+ * Only removes truly problematic fields like $ref, $defs, etc.
+ * Flattens allOf/anyOf/oneOf to avoid API errors.
+ * 
+ * @param {Object} schema - Schema to sanitize
+ * @param {boolean} isTopLevel - Whether this is a top-level schema (for placeholder logic)
+ * @returns {Object} Minimally sanitized schema
+ */
+export function sanitizeSchemaForClaude(schema, isTopLevel = true) {
+    if (!schema || typeof schema !== 'object') {
+        // Empty/missing schema - only add placeholder for top-level schemas
+        if (isTopLevel) {
+            console.log('[SchemaSanitizer] Empty top-level schema detected, generating placeholder');
+            return {
+                type: 'object',
+                properties: {
+                    reason: {
+                        type: 'string',
+                        description: 'Reason for calling this tool'
+                    }
+                },
+                required: ['reason']
+            };
+        } else {
+            // Nested empty schema - return empty object, don't add placeholder
+            return { type: 'object', properties: {} };
+        }
+    }
+
+    // DEBUG: Log original schema structure
+    if (process.env.DEBUG && isTopLevel) {
+        const originalKeys = Object.keys(schema);
+        const originalProperties = schema.properties ? Object.keys(schema.properties) : [];
+        console.log(`[SchemaSanitizer] Claude sanitization START: schema_keys=[${originalKeys.join(', ')}], properties=[${originalProperties.join(', ')}], constraints=[${originalKeys.filter(k => ['minLength', 'maxLength', 'pattern', 'format'].includes(k)).join(', ')}]`);
+    }
+
+    // Only remove truly problematic fields that cause API errors
+    const PROBLEMATIC_FIELDS = new Set([
+        '$ref', '$defs', '$id', '$schema', '$comment', 'definitions'
+    ]);
+
+    let sanitized = { ...schema };
+    const removedFields = [];
+
+    // Remove problematic top-level fields
+    for (const key of PROBLEMATIC_FIELDS) {
+        if (key in sanitized) {
+            removedFields.push(key);
+            delete sanitized[key];
+        }
+    }
+
+    if (removedFields.length > 0 && process.env.DEBUG) {
+        console.log(`[SchemaSanitizer] Removed problematic fields: ${removedFields.join(', ')}`);
+    }
+
+    // CRITICAL FIX: Flatten allOf/anyOf/oneOf before processing
+    // Claude API may not handle these complex schema compositions well
+    // Use the same flattening logic as Gemini but preserve more fields
+    if (Array.isArray(sanitized.allOf) && sanitized.allOf.length > 0) {
+        sanitized = mergeAllOf(sanitized);
+    }
+
+    if (Array.isArray(sanitized.anyOf) || Array.isArray(sanitized.oneOf)) {
+        sanitized = flattenAnyOfOneOf(sanitized);
+    }
+
+    // Recursively process properties (after flattening)
+    // CRITICAL: Preserve all properties - only sanitize nested schemas, don't remove properties
+    if (sanitized.properties && typeof sanitized.properties === 'object') {
+        const originalPropKeys = Object.keys(sanitized.properties);
+        const newProps = {};
+        for (const [propKey, propValue] of Object.entries(sanitized.properties)) {
+            // Only recursively sanitize if propValue is a schema object
+            // CRITICAL: Pass isTopLevel=false to prevent placeholder addition in nested schemas
+            if (propValue && typeof propValue === 'object' && !Array.isArray(propValue)) {
+                const sanitizedProp = sanitizeSchemaForClaude(propValue, false);
+                // Always preserve the property - even if sanitization changed it
+                newProps[propKey] = sanitizedProp;
+            } else {
+                // Non-object property value - preserve as-is
+                newProps[propKey] = propValue;
+            }
+        }
+        sanitized.properties = newProps;
+
+        if (process.env.DEBUG && originalPropKeys.length !== Object.keys(newProps).length) {
+            console.warn(`[SchemaSanitizer] Properties count changed: ${originalPropKeys.length} → ${Object.keys(newProps).length}`);
+            console.warn(`[SchemaSanitizer] Original: [${originalPropKeys.join(', ')}]`);
+            console.warn(`[SchemaSanitizer] New: [${Object.keys(newProps).join(', ')}]`);
+        }
+    }
+
+    // CRITICAL FIX: Validate required array - only include properties that actually exist
+    // This prevents "invalid arguments" errors when required fields reference non-existent properties
+    if (sanitized.required && Array.isArray(sanitized.required) && sanitized.properties) {
+        const definedProps = new Set(Object.keys(sanitized.properties));
+        const originalRequired = sanitized.required;
+        sanitized.required = sanitized.required.filter(prop => definedProps.has(prop));
+
+        if (sanitized.required.length !== originalRequired.length) {
+            const removed = originalRequired.filter(prop => !definedProps.has(prop));
+            console.log(`[SchemaSanitizer] Removed invalid required fields: [${removed.join(', ')}]`);
+        }
+
+        // If all required fields were invalid, remove the required array
+        if (sanitized.required.length === 0) {
+            delete sanitized.required;
+        }
+    }
+
+    // Recursively process items
+    if (sanitized.items) {
+        if (Array.isArray(sanitized.items)) {
+            sanitized.items = sanitized.items.map(item => sanitizeSchemaForClaude(item));
+        } else if (typeof sanitized.items === 'object') {
+            sanitized.items = sanitizeSchemaForClaude(sanitized.items);
+        }
+    }
+
+    // CRITICAL FIX: Validate and fix type field
+    // Ensure type is a valid JSON Schema type (string, number, integer, boolean, object, array, null)
+    const VALID_TYPES = new Set(['string', 'number', 'integer', 'boolean', 'object', 'array', 'null']);
+
+    if (sanitized.type) {
+        // Handle array types (e.g., ["string", "null"])
+        if (Array.isArray(sanitized.type)) {
+            // Flatten type array - take first non-null type
+            const nonNullTypes = sanitized.type.filter(t => t !== 'null' && VALID_TYPES.has(t));
+            sanitized.type = nonNullTypes.length > 0 ? nonNullTypes[0] : 'string';
+        } else if (!VALID_TYPES.has(sanitized.type)) {
+            // Invalid type - default to object for objects with properties, string otherwise
+            console.warn(`[SchemaSanitizer] Invalid type "${sanitized.type}", defaulting to object`);
+            sanitized.type = sanitized.properties ? 'object' : 'string';
+        }
+    } else {
+        // No type specified - infer from context
+        if (sanitized.properties) {
+            sanitized.type = 'object';
+        } else if (sanitized.items) {
+            sanitized.type = 'array';
+        } else {
+            sanitized.type = 'object'; // Default fallback
+        }
+    }
+
+    // FIX: Add placeholder for empty schemas - matches original antigravity-claude-proxy behavior
+    // Google Cloud Code API requires at least one property in schema for Claude models
+    // Cursor sends empty schemas intentionally (parameters are described in tool description)
+    // Without this placeholder, Claude models fail with "invalid arguments" errors
+    const originalHadProperties = schema.properties && Object.keys(schema.properties).length > 0;
+    const sanitizedHasProperties = sanitized.properties && Object.keys(sanitized.properties).length > 0;
+
+    if (sanitized.type === 'object' && !sanitizedHasProperties) {
+        // Add placeholder property that allows the model to call the tool
+        // This matches the original antigravity-claude-proxy implementation
+        console.log(`[SchemaSanitizer] Claude: Adding 'reason' placeholder for empty schema`);
+        sanitized.properties = {
+            reason: {
+                type: 'string',
+                description: 'Reason for calling this tool'
+            }
+        };
+        sanitized.required = ['reason'];
+    }
+
+    // Remove any remaining allOf/anyOf/oneOf (should be flattened by now, but safety check)
+    delete sanitized.allOf;
+    delete sanitized.anyOf;
+    delete sanitized.oneOf;
+
+    // DEBUG: Log sanitized schema structure
+    if (process.env.DEBUG && isTopLevel) {
+        const sanitizedKeys = Object.keys(sanitized);
+        const sanitizedProperties = sanitized.properties ? Object.keys(sanitized.properties) : [];
+        const constraintsPreserved = sanitizedKeys.filter(k => ['minLength', 'maxLength', 'pattern', 'format'].includes(k));
+        console.log(`[SchemaSanitizer] Claude sanitization END: schema_keys=[${sanitizedKeys.join(', ')}], properties=[${sanitizedProperties.join(', ')}], constraints_preserved=[${constraintsPreserved.join(', ')}]`);
+    }
+
+    return sanitized;
 }
 
 /**

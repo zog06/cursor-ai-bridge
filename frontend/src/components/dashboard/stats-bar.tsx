@@ -14,7 +14,7 @@ function StatItem({ icon: Icon, label, value }: StatItemProps) {
         <Icon className="h-4 w-4 text-muted-foreground" />
       </div>
       <div>
-        <p className="text-xs text-muted-foreground">{label}</p>
+        <p className="text-sm text-muted-foreground">{label}</p>
         <p className="text-lg font-semibold">{value}</p>
       </div>
     </div>

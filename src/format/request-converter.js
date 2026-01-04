@@ -9,14 +9,12 @@ import {
     isThinkingModel
 } from '../constants.js';
 import { convertContentToParts, convertRole } from './content-converter.js';
-import { sanitizeSchema, cleanSchemaForGemini } from './schema-sanitizer.js';
+import { sanitizeSchema, sanitizeSchemaForClaude, cleanSchemaForGemini } from './schema-sanitizer.js';
 import {
     restoreThinkingSignatures,
     removeTrailingThinkingBlocks,
     reorderAssistantContent,
-    filterUnsignedThinkingBlocks,
-    needsThinkingRecovery,
-    closeToolLoopForThinking
+    filterUnsignedThinkingBlocks
 } from './thinking-utils.js';
 import { estimateTokenCount } from '../utils/helpers.js';
 
@@ -27,12 +25,12 @@ import { estimateTokenCount } from '../utils/helpers.js';
  */
 function extractUsedToolNames(messages) {
     const usedTools = new Set();
-    
+
     if (!messages || !Array.isArray(messages)) return usedTools;
-    
+
     for (const msg of messages) {
         if (!msg || !msg.role) continue;
-        
+
         if ((msg.role === 'assistant' || msg.role === 'model') && Array.isArray(msg.content)) {
             for (const block of msg.content) {
                 if (block && block.type === 'tool_use' && block.name) {
@@ -48,68 +46,28 @@ function extractUsedToolNames(messages) {
             }
         }
     }
-    
+
     return usedTools;
 }
 
 /**
  * Filter tools based on tool_choice and message history to reduce token usage
+ * @deprecated Tool filtering is disabled. This function now returns all tools without filtering.
  * @param {Array} tools - Array of tool definitions
- * @param {string|object} tool_choice - Tool choice directive
- * @param {Array} messages - Message history to check for used tools
- * @returns {Array} Filtered tools array
+ * @param {string|object} tool_choice - Tool choice directive (ignored - deprecated)
+ * @param {Array} messages - Message history to check for used tools (ignored - deprecated)
+ * @returns {Array} All tools array (no filtering applied)
  */
 function filterToolsByChoice(tools, tool_choice, messages) {
+    // DEPRECATED: Tool filtering is disabled. Always return all tools.
+    // Only exception: if tool_choice is "none", return empty array (required by API spec)
     if (!tools || tools.length === 0) return tools;
 
-    // If tool_choice is "none", return empty array
     if (tool_choice === 'none') {
         return [];
     }
 
-    // If tool_choice is an object with a "name" field, filter to only that tool
-    if (tool_choice && typeof tool_choice === 'object' && tool_choice.name) {
-        const toolName = tool_choice.name;
-        const filtered = tools.filter(tool => {
-            const name = tool.name || tool.function?.name || tool.custom?.name;
-            return name === toolName;
-        });
-        
-        if (filtered.length === 0) {
-            console.log(`[RequestConverter] Warning: Tool "${toolName}" specified in tool_choice not found, using all tools`);
-            return tools;
-        }
-        
-        return filtered;
-    }
-
-    // If tool_choice is "required" (without name), return all tools
-    if (tool_choice === 'required') {
-        return tools;
-    }
-
-    // If tool_choice is "auto" or not specified, try to filter based on message history
-    // Only include tools that have been used in the conversation or are likely to be used
-    if (!tool_choice || tool_choice === 'auto' || tool_choice === 'any') {
-        const usedToolNames = extractUsedToolNames(messages);
-        
-        // If we have used tools in history, filter to only those + common tools
-        // Otherwise, return all tools (first message in conversation)
-        if (usedToolNames.size > 0 && usedToolNames.size < tools.length && messages) {
-            const filtered = tools.filter(tool => {
-                if (!tool) return false;
-                const name = tool.name || tool.function?.name || tool.custom?.name;
-                return name && usedToolNames.has(name);
-            });
-            
-            // If filtering would remove all tools, keep all (safety check)
-            if (filtered.length > 0) {
-                return filtered;
-            }
-        }
-    }
-
-    // Unknown tool_choice format or no filtering needed, return all tools
+    // Return all tools without filtering
     return tools;
 }
 
@@ -134,7 +92,7 @@ function calculateToolTokens(tools) {
         const nameTokens = estimateTokenCount(name);
         const descTokens = estimateTokenCount(tool.description || tool.function?.description || tool.custom?.description || '');
         const schemaTokens = estimateTokenCount(tool.input_schema || tool.function?.input_schema || tool.function?.parameters || tool.custom?.input_schema || tool.parameters || {});
-        
+
         // Add overhead for JSON structure (~10 tokens per tool)
         const overhead = 10;
         totalTokens += nameTokens + descTokens + schemaTokens + overhead;
@@ -204,26 +162,48 @@ export function convertAnthropicToGoogle(anthropicRequest) {
         }
     }
 
-    // Apply thinking recovery for Gemini thinking models when needed
-    // This handles corrupted tool loops where thinking blocks are stripped
-    // Claude models handle this differently and don't need this recovery
+    // NOTE: Anti-Mimicry instruction removed - we no longer convert tool_use/tool_result to text.
+    // The system works professionally with native tool formats only.
+
+    // NOTE: Text recovery (closeToolLoopForThinking) is disabled for Gemini models.
+    // With proper signature handling, thinking blocks are preserved correctly
+    // and tool_use/tool_result blocks remain in their native format.
+    // No text conversion is performed - the system works professionally with native tool formats.
     let processedMessages = messages;
-    if (isGeminiModel && isThinking && needsThinkingRecovery(messages)) {
-        console.log('[RequestConverter] Applying thinking recovery for Gemini');
-        processedMessages = closeToolLoopForThinking(messages);
-    }
 
     // Build a map of tool_use_id -> tool_name from all assistant messages
     // This is needed because tool_result blocks only have tool_use_id, not tool name
+    // Also check user messages for tool_result blocks that might have name field
     const toolUseIdToNameMap = new Map();
     for (const msg of processedMessages) {
         if ((msg.role === 'assistant' || msg.role === 'model') && Array.isArray(msg.content)) {
             for (const block of msg.content) {
                 if (block.type === 'tool_use' && block.id && block.name) {
                     toolUseIdToNameMap.set(block.id, block.name);
+                    if (process.env.DEBUG) {
+                        console.log(`[RequestConverter] Mapped tool_use: id=${block.id}, name=${block.name}`);
+                    }
                 }
             }
         }
+        // Also check user messages for tool_result blocks with name field (some APIs include it)
+        if (msg.role === 'user' && Array.isArray(msg.content)) {
+            for (const block of msg.content) {
+                if (block.type === 'tool_result' && block.tool_use_id && block.name) {
+                    // If we don't already have this ID mapped, use the name from tool_result
+                    if (!toolUseIdToNameMap.has(block.tool_use_id)) {
+                        toolUseIdToNameMap.set(block.tool_use_id, block.name);
+                        if (process.env.DEBUG) {
+                            console.log(`[RequestConverter] Mapped tool_result: id=${block.tool_use_id}, name=${block.name}`);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (process.env.DEBUG && toolUseIdToNameMap.size > 0) {
+        console.log(`[RequestConverter] Built tool_use_id map with ${toolUseIdToNameMap.size} entries`);
     }
 
     // Convert messages to contents, then filter unsigned thinking blocks
@@ -234,9 +214,11 @@ export function convertAnthropicToGoogle(anthropicRequest) {
         // For assistant messages, process thinking blocks and reorder content
         if ((msg.role === 'assistant' || msg.role === 'model') && Array.isArray(msgContent)) {
             // First, try to restore signatures for unsigned thinking blocks from cache
-            msgContent = restoreThinkingSignatures(msgContent);
+            // Pass isGeminiModel flag so Gemini placeholder signatures are preserved
+            msgContent = restoreThinkingSignatures(msgContent, isGeminiModel);
             // Remove trailing unsigned thinking blocks
-            msgContent = removeTrailingThinkingBlocks(msgContent);
+            // Pass isGeminiModel flag so Gemini placeholder signatures are preserved
+            msgContent = removeTrailingThinkingBlocks(msgContent, isGeminiModel);
             // Reorder: thinking first, then text, then tool_use
             msgContent = reorderAssistantContent(msgContent);
         }
@@ -246,7 +228,6 @@ export function convertAnthropicToGoogle(anthropicRequest) {
         // SAFETY: Google API requires at least one part per content message
         // This happens when all thinking blocks are filtered out (unsigned)
         if (parts.length === 0) {
-            console.log('[RequestConverter] WARNING: Empty parts array after filtering, adding placeholder');
             parts.push({ text: '' });
         }
 
@@ -257,9 +238,11 @@ export function convertAnthropicToGoogle(anthropicRequest) {
         googleRequest.contents.push(content);
     }
 
-    // Filter unsigned thinking blocks for Claude models
-    if (isClaudeModel) {
-        googleRequest.contents = filterUnsignedThinkingBlocks(googleRequest.contents);
+    // Filter unsigned thinking blocks for both Claude and Gemini models
+    // This provides an extra safety layer after content conversion
+    // Note: Gemini placeholder signatures are already handled in restoreThinkingSignatures
+    if (isClaudeModel || isGeminiModel) {
+        googleRequest.contents = filterUnsignedThinkingBlocks(googleRequest.contents, isGeminiModel);
     }
 
     // Generation config
@@ -305,40 +288,31 @@ export function convertAnthropicToGoogle(anthropicRequest) {
         }
     }
 
-    // Filter tools based on tool_choice to reduce token usage
+    // DEPRECATED: Tool filtering is disabled. All tools are now sent without filtering.
+    // This section is kept for backward compatibility but filtering logic is disabled.
     let filteredTools = tools;
     let toolFilteringInfo = null;
-    
+
     if (tools && tools.length > 0) {
-        const originalToolCount = tools.length;
+        // DEPRECATED: filterToolsByChoice now returns all tools (except when tool_choice is 'none')
         filteredTools = filterToolsByChoice(tools, tool_choice, processedMessages);
         const filteredToolCount = filteredTools.length;
 
-        // Calculate token usage for original and filtered tools
-        const originalTokens = calculateToolTokens(tools);
-        const filteredTokens = calculateToolTokens(filteredTools);
-        const tokensSaved = originalTokens.totalTokens - filteredTokens.totalTokens;
+        // Calculate token usage for tools (no filtering applied, so filtered = original)
+        const toolTokens = calculateToolTokens(filteredTools);
 
+        // Keep toolFilteringInfo structure for backward compatibility
         toolFilteringInfo = {
-            originalCount: originalToolCount,
+            originalCount: filteredToolCount,
             filteredCount: filteredToolCount,
-            originalTokens: originalTokens.totalTokens,
-            filteredTokens: filteredTokens.totalTokens,
-            tokensSaved: tokensSaved,
-            toolNames: filteredTokens.toolNames
+            originalTokens: toolTokens.totalTokens,
+            filteredTokens: toolTokens.totalTokens,
+            tokensSaved: 0, // No filtering, so no tokens saved
+            toolNames: toolTokens.toolNames
         };
-
-        // Log tool filtering results
-        if (filteredToolCount < originalToolCount) {
-            console.log(`[RequestConverter] Tool filtering: ${originalToolCount} → ${filteredToolCount} tools (saved ~${tokensSaved} tokens)`);
-        } else if (filteredToolCount > 50) {
-            console.log(`[RequestConverter] Warning: ${filteredToolCount} tools enabled (high count, ~${filteredTokens.totalTokens} tokens)`);
-        } else {
-            console.log(`[RequestConverter] ${filteredToolCount} tools enabled (~${filteredTokens.totalTokens} tokens)`);
-        }
     }
 
-    // Convert filtered tools to Google format
+    // Convert tools to Google format (all tools, no filtering)
     if (filteredTools && filteredTools.length > 0) {
         const functionDeclarations = filteredTools.map((tool, idx) => {
             // Extract name from various possible locations
@@ -355,16 +329,35 @@ export function convertAnthropicToGoogle(anthropicRequest) {
                 || tool.parameters
                 || { type: 'object' };
 
-            // Sanitize schema for general compatibility
-            let parameters = sanitizeSchema(schema);
+            // Log original schema structure
+            const schemaType = schema?.type || 'unknown';
+            const schemaProperties = schema?.properties ? Object.keys(schema.properties) : [];
+            // console.log(`[RequestConverter] Tool "${name}": original schema type="${schemaType}", properties=[${schemaProperties.join(', ')}], keys=[${Object.keys(schema).join(', ')}]`);
 
-            // For Gemini models, apply additional cleaning for VALIDATED mode
+            // For Claude models, use minimal sanitization to preserve schema integrity
+            // Claude models can handle more JSON Schema features than Gemini
+            // For Gemini models, apply full cleaning pipeline for VALIDATED mode
+            let parameters;
+            const originalSchemaKeys = Object.keys(schema || {});
+
             if (isGeminiModel) {
+                // Gemini requires aggressive sanitization
+                parameters = sanitizeSchema(schema);
                 parameters = cleanSchemaForGemini(parameters);
+                // console.log(`[RequestConverter] Tool "${name}": Gemini schema sanitization applied (${originalSchemaKeys.length} → ${Object.keys(parameters).length} top-level keys)`);
+            } else if (isClaudeModel) {
+                // Claude models: minimal sanitization - only remove truly problematic fields
+                // Preserve most schema features to avoid "invalid arguments" errors
+                parameters = sanitizeSchemaForClaude(schema);
+            } else {
+                // Other models: use standard sanitization
+                parameters = sanitizeSchema(schema);
             }
 
+            const sanitizedName = String(name).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+
             return {
-                name: String(name).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64),
+                name: sanitizedName,
                 description: description,
                 parameters
             };
@@ -375,7 +368,6 @@ export function convertAnthropicToGoogle(anthropicRequest) {
 
     // Cap max tokens for Gemini models
     if (isGeminiModel && googleRequest.generationConfig.maxOutputTokens > GEMINI_MAX_OUTPUT_TOKENS) {
-        console.log(`[RequestConverter] Capping Gemini max_tokens from ${googleRequest.generationConfig.maxOutputTokens} to ${GEMINI_MAX_OUTPUT_TOKENS}`);
         googleRequest.generationConfig.maxOutputTokens = GEMINI_MAX_OUTPUT_TOKENS;
     }
 
