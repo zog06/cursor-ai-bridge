@@ -2,18 +2,18 @@
 
 > **Note:** This is a fork/modified version of the original project. For the original project, please visit: [badri-s2001/antigravity-claude-proxy](https://github.com/badri-s2001/antigravity-claude-proxy)
 
-> **Model Status:** Claude models are fully tested and working smoothly. Gemini models are available but have not been extensively tested yet.
+> **Model Status:** Gemini models are tested and working great. Claude models are currently not stable due to tool usage problems.
 
 **Tested and Working Models:**
 
 | Model ID | Cursor Model Name | Status |
 |----------|-------------------|--------|
-| `claude-sonnet-4-5-thinking` | `claude-sonnet-4-5-thinking` | ✅ Tested |
-| `claude-opus-4-5-thinking` | `claude-opus-4-5-thinking` | ✅ Tested |
-| `claude-sonnet-4-5` | `claude-sonnet-4-5` | ✅ Tested |
-| `gemini-3-flash` | `antigravity-gemini-3-flash` | ⚠️ Not Yet Tested |
-| `gemini-3-pro-low` | `antigravity-gemini-3-pro-low` | ⚠️ Not Yet Tested |
-| `gemini-3-pro-high` | `antigravity-gemini-3-pro-high` | ⚠️ Not Yet Tested |
+| `claude-sonnet-4-5-thinking` | `claude-sonnet-4-5-thinking` | ⚠️ Not stable (tool usage problems) |
+| `claude-opus-4-5-thinking` | `claude-opus-4-5-thinking` | ⚠️ Not stable (tool usage problems) |
+| `claude-sonnet-4-5` | `claude-sonnet-4-5` | ⚠️ Not stable (tool usage problems) |
+| `gemini-3-flash` | `antigravity-gemini-3-flash` | ✅ Tested working great |
+| `gemini-3-pro-low` | `antigravity-gemini-3-pro-low` | ✅ Tested working great |
+| `gemini-3-pro-high` | `antigravity-gemini-3-pro-high` | ✅ Tested working great |
 
 > **Cursor Compatibility:** Gemini models require the `antigravity-` prefix in Cursor IDE to avoid conflicts with built-in models. The proxy automatically strips this prefix.
 
