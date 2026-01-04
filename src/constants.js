@@ -96,7 +96,7 @@ export const MAX_WAIT_BEFORE_ERROR_MS = 120000; // 2 minutes - throw error if wa
 export const MIN_SIGNATURE_LENGTH = 50; // Minimum valid thinking signature length
 
 // Gemini-specific limits
-export const GEMINI_MAX_OUTPUT_TOKENS = 16384;
+export const GEMINI_MAX_OUTPUT_TOKENS = 65536;
 
 // Gemini signature handling
 // Sentinel value to skip thought signature validation when Claude Code strips the field

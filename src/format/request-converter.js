@@ -279,10 +279,23 @@ export function convertAnthropicToGoogle(anthropicRequest) {
             googleRequest.generationConfig.thinkingConfig = thinkingConfig;
         } else if (isGeminiModel) {
             // Gemini thinking config (uses camelCase)
+            const thinkingBudget = thinking?.budget_tokens || 16000;
             const thinkingConfig = {
                 includeThoughts: true,
-                thinkingBudget: thinking?.budget_tokens || 16000
+                thinkingBudget: thinkingBudget
             };
+
+            // Validate max_tokens > thinkingBudget as required by the API
+            const currentMaxTokens = googleRequest.generationConfig.maxOutputTokens;
+            if (currentMaxTokens && currentMaxTokens <= thinkingBudget) {
+                // Bump max_tokens to allow for some response content
+                // Default to budget + 8192 (standard output buffer)
+                const adjustedMaxTokens = thinkingBudget + 8192;
+                if (process.env.DEBUG) {
+                    console.log(`[RequestConverter] Gemini max_tokens (${currentMaxTokens}) <= thinkingBudget (${thinkingBudget}). Adjusting to ${adjustedMaxTokens}`);
+                }
+                googleRequest.generationConfig.maxOutputTokens = adjustedMaxTokens;
+            }
 
             googleRequest.generationConfig.thinkingConfig = thinkingConfig;
         }
