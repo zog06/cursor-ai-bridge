@@ -27,7 +27,7 @@ import {
 import { cacheSignature } from './format/signature-cache.js';
 import { formatDuration, sleep } from './utils/helpers.js';
 import { isRateLimitError, isAuthError } from './errors.js';
-import { logDebugFile } from './utils/logger.js';
+import { logDebugFile, logToolUsage } from './utils/logger.js';
 
 /**
  * Check if an error is a rate limit error (429 or RESOURCE_EXHAUSTED)
@@ -327,8 +327,24 @@ export async function sendMessage(anthropicRequest, accountManager) {
 
             // Try each endpoint
             let lastError = null;
+            const isClaudeModel = (anthropicRequest.model || '').toLowerCase().includes('claude');
             for (const endpoint of ANTIGRAVITY_ENDPOINT_FALLBACKS) {
                 try {
+                    // CRITICAL: Log Google request for Claude tool usage debugging
+                    // Log before first request attempt
+                    if (isClaudeModel && payload.request?.tools && endpoint === ANTIGRAVITY_ENDPOINT_FALLBACKS[0]) {
+                        try {
+                            logToolUsage(payload.requestId || 'unknown', 'google-request', {
+                                googleRequest: payload.request,
+                                endpoint: endpoint,
+                                account: account.email,
+                                stream: false
+                            }, anthropicRequest.model);
+                        } catch (err) {
+                            console.error('[CloudCode] Failed to log Google request:', err);
+                        }
+                    }
+
                     const url = isThinking
                         ? `${endpoint}/v1internal:streamGenerateContent?alt=sse`
                         : `${endpoint}/v1internal:generateContent`;
@@ -386,11 +402,26 @@ export async function sendMessage(anthropicRequest, accountManager) {
 
                     // For thinking models, parse SSE and accumulate all parts
                     if (isThinking) {
-                        return await parseThinkingSSEResponse(response, anthropicRequest.model);
+                        const responseData = await parseThinkingSSEResponse(response, anthropicRequest.model);
+                        return { ...responseData, _account: account.email };
                     }
 
                     // Non-thinking models use regular JSON
                     const data = await response.json();
+
+                    // CRITICAL: Log Google response for Claude tool usage debugging
+                    if (isClaudeModel && payload.request?.tools) {
+                        try {
+                            logToolUsage(payload.requestId || 'unknown', 'google-response', {
+                                googleResponse: data,
+                                endpoint: endpoint,
+                                account: account.email,
+                                status: response.status
+                            }, anthropicRequest.model);
+                        } catch (err) {
+                            console.error('[CloudCode] Failed to log Google response:', err);
+                        }
+                    }
 
                     /*
                     try {
@@ -401,7 +432,10 @@ export async function sendMessage(anthropicRequest, accountManager) {
                     */
 
                     // Response received successfully (no logging needed)
-                    return convertGoogleToAnthropic(data, anthropicRequest.model);
+                    return {
+                        ...convertGoogleToAnthropic(data, anthropicRequest.model),
+                        _account: account.email
+                    };
 
                 } catch (endpointError) {
                     if (is429Error(endpointError)) {
@@ -615,8 +649,24 @@ export async function* sendMessageStream(anthropicRequest, accountManager) {
 
             // Try each endpoint for streaming
             let lastError = null;
+            const isClaudeModel = (anthropicRequest.model || '').toLowerCase().includes('claude');
             for (const endpoint of ANTIGRAVITY_ENDPOINT_FALLBACKS) {
                 try {
+                    // CRITICAL: Log Google request for Claude tool usage debugging (Streaming)
+                    // Log before first request attempt
+                    if (isClaudeModel && payload.request?.tools && endpoint === ANTIGRAVITY_ENDPOINT_FALLBACKS[0]) {
+                        try {
+                            logToolUsage(payload.requestId || 'unknown', 'google-request', {
+                                googleRequest: payload.request,
+                                endpoint: endpoint,
+                                account: account.email,
+                                stream: true
+                            }, anthropicRequest.model);
+                        } catch (err) {
+                            console.error('[CloudCode] Failed to log streaming Google request:', err);
+                        }
+                    }
+
                     const url = `${endpoint}/v1internal:streamGenerateContent?alt=sse`;
 
                     const response = await fetch(url, {
@@ -670,6 +720,7 @@ export async function* sendMessageStream(anthropicRequest, accountManager) {
                     }
 
                     // Stream the response - yield events as they arrive
+                    yield { type: 'internal_metadata', account: account.email };
                     yield* streamSSEResponse(response, anthropicRequest.model);
 
                     // Stream completed successfully (no logging needed)
@@ -888,13 +939,37 @@ async function* streamSSEResponse(response, originalModel) {
 
                         const toolId = part.functionCall.id || `toolu_${crypto.randomBytes(12).toString('hex')}`;
 
+                        // CRITICAL FIX: Validate and sanitize args to prevent "invalid arguments" errors
+                        let args = part.functionCall.args || {};
+                        
+                        // Ensure args is always a plain object, not null/undefined/string/array
+                        if (typeof args === 'string') {
+                            try {
+                                args = JSON.parse(args);
+                            } catch (e) {
+                                console.warn(`[CloudCode] Failed to parse streaming tool call args as JSON for "${part.functionCall.name}", using empty object: ${e.message}`);
+                                args = {};
+                            }
+                        } else if (!args || typeof args !== 'object' || Array.isArray(args)) {
+                            console.warn(`[CloudCode] Invalid streaming tool call args type (${typeof args}) for "${part.functionCall.name}", using empty object`);
+                            args = {};
+                        }
+                        
+                        // Remove any non-serializable values (functions, undefined, circular refs, etc.)
+                        try {
+                            JSON.stringify(args);
+                        } catch (e) {
+                            console.warn(`[CloudCode] Streaming tool call args for "${part.functionCall.name}" contains non-serializable values, using empty object: ${e.message}`);
+                            args = {};
+                        }
+
                         // For Gemini, include the thoughtSignature in the tool_use block
                         // so it can be sent back in subsequent requests
                         const toolUseBlock = {
                             type: 'tool_use',
                             id: toolId,
                             name: part.functionCall.name,
-                            input: {}
+                            input: args
                         };
 
                         // Store the signature in the tool_use block for later retrieval
@@ -915,7 +990,7 @@ async function* streamSSEResponse(response, originalModel) {
                             index: blockIndex,
                             delta: {
                                 type: 'input_json_delta',
-                                partial_json: JSON.stringify(part.functionCall.args || {})
+                                partial_json: JSON.stringify(args)
                             }
                         };
                     }

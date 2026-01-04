@@ -261,7 +261,7 @@ export function ApiConfigCard({ apiKey, ngrokUrl }: ApiConfigCardProps) {
             </Button>
           </div>
           <SecretField value={currentApiKey} />
-          <p className="text-xs text-muted-foreground">
+          <p className="text-sm text-muted-foreground">
             Use this key to authenticate requests to the proxy server
           </p>
         </div>
@@ -270,7 +270,7 @@ export function ApiConfigCard({ apiKey, ngrokUrl }: ApiConfigCardProps) {
           <div className="pt-3 border-t border-border/40 space-y-3">
             <h3 className="text-sm font-semibold">Public Endpoint</h3>
             <SecretField value={ngrokUrl} size="sm" />
-            <p className="text-xs text-muted-foreground">
+            <p className="text-sm text-muted-foreground">
               Use this URL as Base URL in Cursor IDE
             </p>
           </div>
@@ -284,7 +284,7 @@ export function ApiConfigCard({ apiKey, ngrokUrl }: ApiConfigCardProps) {
               <div className="flex items-start gap-2 p-3 rounded-md bg-yellow-500/10 border border-yellow-500/20">
                 <AlertCircle className="h-4 w-4 text-yellow-500 mt-0.5 shrink-0" />
                 <div className="flex-1">
-                  <p className="text-xs font-medium text-yellow-600 dark:text-yellow-400 mb-1">
+                  <p className="text-sm font-medium text-yellow-600 dark:text-yellow-400 mb-1">
                     ⚠️ Close Cursor
                   </p>
                   <p className="text-xs text-yellow-600/80 dark:text-yellow-400/80">
@@ -300,12 +300,12 @@ export function ApiConfigCard({ apiKey, ngrokUrl }: ApiConfigCardProps) {
               <div className="flex-1">
                 <p className="text-sm font-medium mb-1">Cursor OpenAI Configuration</p>
                 <div className="space-y-1">
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-sm text-muted-foreground">
                     API Key: {openAISettings.apiKey 
                       ? `${openAISettings.apiKey.substring(0, 5)}${'*'.repeat(Math.max(0, openAISettings.apiKey.length - 5))}`
                       : "Not configured"}
                   </p>
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-sm text-muted-foreground">
                     Base URL: {openAISettings.baseUrl 
                       ? `${openAISettings.baseUrl.substring(0, 11)}${'*'.repeat(Math.max(0, openAISettings.baseUrl.length - 11))}`
                       : "Not configured"}

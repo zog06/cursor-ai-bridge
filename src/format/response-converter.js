@@ -70,7 +70,52 @@ export function convertGoogleToAnthropic(googleResponse, model) {
             // Convert functionCall to tool_use
             // Use the id from the response if available, otherwise generate one
             const toolId = part.functionCall.id || `toolu_${crypto.randomBytes(12).toString('hex')}`;
-            const args = part.functionCall.args || {};
+            let args = part.functionCall.args || {};
+            
+            // CRITICAL FIX: Ensure args is always an object, not null/undefined/string
+            // Some APIs might return args as string or null, which causes "invalid arguments" errors
+            if (typeof args === 'string') {
+                try {
+                    args = JSON.parse(args);
+                } catch (e) {
+                    console.warn(`[ResponseConverter] Failed to parse args as JSON for "${part.functionCall.name}", using empty object: ${e.message}`);
+                    args = {};
+                }
+            } else if (!args || typeof args !== 'object' || Array.isArray(args)) {
+                // If args is null, undefined, or not an object, use empty object
+                console.warn(`[ResponseConverter] Invalid args type (${typeof args}) for "${part.functionCall.name}", using empty object`);
+                args = {};
+            }
+            
+            // Remove any non-serializable values (functions, undefined, circular refs, etc.)
+            try {
+                // Test if args can be JSON serialized (catches circular refs, functions, etc.)
+                JSON.stringify(args);
+            } catch (e) {
+                console.warn(`[ResponseConverter] Args for "${part.functionCall.name}" contains non-serializable values, using empty object: ${e.message}`);
+                args = {};
+            }
+            
+            // Deep clean: remove undefined values and functions (they cause API errors)
+            const cleanArgs = (obj) => {
+                if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) {
+                    return obj;
+                }
+                const cleaned = {};
+                for (const [key, value] of Object.entries(obj)) {
+                    if (value === undefined || typeof value === 'function') {
+                        continue; // Skip undefined and functions
+                    }
+                    if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+                        cleaned[key] = cleanArgs(value);
+                    } else {
+                        cleaned[key] = value;
+                    }
+                }
+                return cleaned;
+            };
+            args = cleanArgs(args);
+            
             const argsKeys = Object.keys(args);
             const argsPreview = argsKeys.length > 0
                 ? argsKeys.map(k => `${k}=${JSON.stringify(args[k]).substring(0, 50)}`).join(', ')
@@ -95,6 +140,9 @@ export function convertGoogleToAnthropic(googleResponse, model) {
 
             anthropicContent.push(toolUseBlock);
             hasToolCalls = true;
+        } else if (part.functionResponse) {
+            // Log functionResponse for debugging
+            console.log(`[ResponseConverter] Received functionResponse: name="${part.functionResponse.name}", id="${part.functionResponse.id || 'none'}"`);
         }
     }
 
@@ -127,6 +175,13 @@ export function convertGoogleToAnthropic(googleResponse, model) {
     const usageMetadata = response.usageMetadata || {};
     const promptTokens = usageMetadata.promptTokenCount || 0;
     const cachedTokens = usageMetadata.cachedContentTokenCount || 0;
+
+    // Log summary of converted content
+    const toolUseBlocks = anthropicContent.filter(b => b.type === 'tool_use');
+    const toolUseNames = toolUseBlocks.map(b => b.name);
+    if (toolUseBlocks.length > 0) {
+        console.log(`[ResponseConverter] Converted ${toolUseBlocks.length} tool_use blocks: [${toolUseNames.join(', ')}]`);
+    }
 
     return {
         id: `msg_${crypto.randomBytes(16).toString('hex')}`,

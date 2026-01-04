@@ -52,3 +52,154 @@ export function logError(context, error) {
         console.error('[Logger] Failed to write error log:', err);
     }
 }
+
+/**
+ * Log Claude tool usage request/response for debugging
+ * @param {string} requestId - Unique request ID
+ * @param {string} stage - Stage of the request ('incoming', 'google-request', 'google-response', 'outgoing')
+ * @param {Object} data - Data to log
+ * @param {string} model - Model name
+ */
+export function logToolUsage(requestId, stage, data, model = 'unknown') {
+    try {
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const modelFamily = model.toLowerCase().includes('claude') ? 'claude' : 
+                           model.toLowerCase().includes('gemini') ? 'gemini' : 'unknown';
+        const filename = `tool-usage-${modelFamily}-${stage}-${timestamp}-${requestId}.json`;
+        const filePath = path.join(LOGS_DIR, filename);
+
+        // Extract tool-related information for easier analysis
+        const logData = {
+            timestamp: new Date().toISOString(),
+            requestId,
+            stage,
+            model,
+            modelFamily,
+            ...data
+        };
+
+        // Add tool call analysis for easier debugging
+        if (stage === 'incoming' && data.messages) {
+            const toolCalls = [];
+            const toolResults = [];
+            data.messages.forEach((msg, idx) => {
+                if (Array.isArray(msg.content)) {
+                    msg.content.forEach(block => {
+                        if (block.type === 'tool_use') {
+                            toolCalls.push({
+                                messageIndex: idx,
+                                role: msg.role,
+                                toolId: block.id,
+                                toolName: block.name,
+                                input: block.input
+                            });
+                        } else if (block.type === 'tool_result') {
+                            toolResults.push({
+                                messageIndex: idx,
+                                role: msg.role,
+                                toolUseId: block.tool_use_id,
+                                toolName: block.name,
+                                contentPreview: typeof block.content === 'string' 
+                                    ? block.content.substring(0, 200) 
+                                    : JSON.stringify(block.content).substring(0, 200)
+                            });
+                        }
+                    });
+                }
+            });
+            logData.toolCalls = toolCalls;
+            logData.toolResults = toolResults;
+        }
+
+        // Add tool definitions analysis
+        if (data.tools && Array.isArray(data.tools)) {
+            logData.toolDefinitions = data.tools.map(tool => ({
+                name: tool.name || tool.function?.name,
+                description: tool.description || tool.function?.description,
+                schemaKeys: tool.input_schema || tool.function?.input_schema || tool.function?.parameters 
+                    ? Object.keys(tool.input_schema || tool.function?.input_schema || tool.function?.parameters || {})
+                    : []
+            }));
+        }
+
+        // Add Google request analysis
+        if (stage === 'google-request' && data.googleRequest) {
+            const googleTools = data.googleRequest.tools?.[0]?.functionDeclarations || [];
+            logData.googleTools = googleTools.map(tool => ({
+                name: tool.name,
+                description: tool.description?.substring(0, 100),
+                parametersKeys: tool.parameters ? Object.keys(tool.parameters) : [],
+                parametersType: tool.parameters?.type,
+                hasRequired: Array.isArray(tool.parameters?.required),
+                requiredFields: tool.parameters?.required || []
+            }));
+
+            // Analyze contents for functionCall/functionResponse
+            const functionCalls = [];
+            const functionResponses = [];
+            data.googleRequest.contents?.forEach((content, idx) => {
+                content.parts?.forEach(part => {
+                    if (part.functionCall) {
+                        functionCalls.push({
+                            contentIndex: idx,
+                            role: content.role,
+                            name: part.functionCall.name,
+                            id: part.functionCall.id,
+                            argsKeys: part.functionCall.args ? Object.keys(part.functionCall.args) : [],
+                            argsPreview: JSON.stringify(part.functionCall.args || {}).substring(0, 200)
+                        });
+                    } else if (part.functionResponse) {
+                        functionResponses.push({
+                            contentIndex: idx,
+                            role: content.role,
+                            name: part.functionResponse.name,
+                            id: part.functionResponse.id,
+                            responseKeys: part.functionResponse.response ? Object.keys(part.functionResponse.response) : [],
+                            responsePreview: JSON.stringify(part.functionResponse.response || {}).substring(0, 200)
+                        });
+                    }
+                });
+            });
+            logData.googleFunctionCalls = functionCalls;
+            logData.googleFunctionResponses = functionResponses;
+        }
+
+        // Add Google response analysis
+        if (stage === 'google-response' && data.googleResponse) {
+            const response = data.googleResponse.response || data.googleResponse;
+            const candidates = response.candidates || [];
+            const parts = candidates[0]?.content?.parts || [];
+            
+            const functionCalls = [];
+            parts.forEach(part => {
+                if (part.functionCall) {
+                    functionCalls.push({
+                        name: part.functionCall.name,
+                        id: part.functionCall.id,
+                        argsKeys: part.functionCall.args ? Object.keys(part.functionCall.args) : [],
+                        argsPreview: JSON.stringify(part.functionCall.args || {}).substring(0, 200)
+                    });
+                }
+            });
+            logData.googleResponseFunctionCalls = functionCalls;
+        }
+
+        // Add outgoing response analysis
+        if (stage === 'outgoing' && data.anthropicResponse) {
+            const content = data.anthropicResponse.content || [];
+            const toolUses = content.filter(b => b.type === 'tool_use').map(b => ({
+                id: b.id,
+                name: b.name,
+                inputKeys: b.input ? Object.keys(b.input) : [],
+                inputPreview: JSON.stringify(b.input || {}).substring(0, 200)
+            }));
+            logData.outgoingToolUses = toolUses;
+        }
+
+        const content = JSON.stringify(logData, null, 2);
+        fs.writeFileSync(filePath, content, 'utf8');
+        console.log(`[Logger] Saved tool usage log: logs/${filename}`);
+    } catch (err) {
+        console.error('[Logger] Failed to write tool usage log:', err);
+    }
+}

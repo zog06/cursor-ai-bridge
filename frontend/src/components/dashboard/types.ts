@@ -2,6 +2,7 @@ export interface Account {
   email: string;
   status: string;
   rateLimited: boolean;
+  isDisabled?: boolean;
   lastUsed?: string;
 }
 
@@ -10,6 +11,7 @@ export interface AccountsData {
   available: number;
   rateLimited: number;
   invalid: number;
+  disabled: number;
   details?: Account[];
 }
 
@@ -33,6 +35,7 @@ export interface RequestData {
   timestamp: string;
   duration?: number;
   model?: string;
+  account?: string;
   stream?: boolean;
   usage?: {
     input_tokens: number;
@@ -65,6 +68,7 @@ export interface AccountLimit {
   email: string;
   status: string;
   error: string | null;
+  isDisabled?: boolean;
   limits: Record<string, ModelLimit | null>;
 }
 

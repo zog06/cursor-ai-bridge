@@ -81,9 +81,36 @@ export function convertContentToParts(content, isClaudeModel = false, isGeminiMo
         } else if (block.type === 'tool_use') {
             // Convert tool_use to functionCall (Google format)
             // For Claude models, include the id field
+            
+            // CRITICAL FIX: Validate and sanitize args to prevent "invalid arguments" errors
+            let args = block.input || {};
+            
+            // Ensure args is always a plain object, not null/undefined/string/array
+            if (typeof args === 'string') {
+                try {
+                    args = JSON.parse(args);
+                } catch (e) {
+                    console.warn(`[ContentConverter] Failed to parse tool_use args as JSON for "${block.name}", using empty object: ${e.message}`);
+                    args = {};
+                }
+            } else if (!args || typeof args !== 'object' || Array.isArray(args)) {
+                // If args is null, undefined, or not a plain object, use empty object
+                console.warn(`[ContentConverter] Invalid tool_use args type (${typeof args}) for "${block.name}", using empty object`);
+                args = {};
+            }
+            
+            // Remove any non-serializable values (functions, undefined, etc.)
+            try {
+                // Test if args can be JSON serialized (catches circular refs, functions, etc.)
+                JSON.stringify(args);
+            } catch (e) {
+                console.warn(`[ContentConverter] Tool_use args for "${block.name}" contains non-serializable values, using empty object: ${e.message}`);
+                args = {};
+            }
+            
             const functionCall = {
                 name: block.name,
-                args: block.input || {}
+                args: args
             };
 
             if (isClaudeModel && block.id) {
@@ -169,41 +196,64 @@ export function convertContentToParts(content, isClaudeModel = false, isGeminiMo
             }
 
             if (isClaudeModel) {
-                // FALLBACK: Google's functionResponse seems to fail for Claude on this proxy 
-                // (Error: messages.2.content.0.text.text: Field required).
-                // Convert to explicit text format to ensure delivery and loop breaking.
-                let textContent = '';
-                // Handle content type
-                if (responseContent.content && typeof responseContent.content === 'string') {
-                    textContent = responseContent.content;
-                } else if (responseContent.result && typeof responseContent.result === 'string') {
-                    textContent = responseContent.result;
+                // Claude models: Direct mapping to functionResponse.format
+                // Google API: { name, response: { content: "..." } }
+                // Anthropic: { content: [{ type: 'tool_result', content: "..." }] }
+
+                let formattedResponse;
+
+                if (typeof responseContent === 'string') {
+                    // String content → { content: string }
+                    formattedResponse = { content: responseContent };
+                } else if (Array.isArray(responseContent)) {
+                    // Array content → extract text, handle images separately
+                    const texts = responseContent
+                        .filter(c => c.type === 'text')
+                        .map(c => c.text)
+                        .join('\n');
+                    formattedResponse = {
+                        content: texts || (imageParts.length > 0 ? 'Image attached' : '')
+                    };
                 } else {
-                    textContent = JSON.stringify(responseContent);
+                    // Object/null → stringified content
+                    formattedResponse = {
+                        content: responseContent ? JSON.stringify(responseContent) : ''
+                    };
                 }
 
-                parts.push({
-                    text: `[Tool Result for '${toolName}': ${textContent}]`
-                });
+                const functionResponse = {
+                    name: toolName,
+                    response: formattedResponse
+                };
 
-                // Add images if any (images are supported in text/user blocks usually)
+                // Include tool_use_id for Claude models (required for matching tool calls)
+                if (block.tool_use_id) {
+                    functionResponse.id = block.tool_use_id;
+                }
+
+                if (process.env.DEBUG) {
+                    console.log(`[ContentConverter] Claude functionResponse: name="${toolName}", id="${block.tool_use_id || 'none'}", response_type="${typeof formattedResponse}", response_has_content=${!!formattedResponse.content}`);
+                }
+
+                parts.push({ functionResponse });
+
+                // Add any images from tool result as separate parts
                 parts.push(...imageParts);
 
-                continue; // Skip functionResponse construction
+                continue; // Skip Gemini formatting below
             }
 
+            // For Gemini and other models: Default functionResponse construction
             const functionResponse = {
                 name: toolName,
                 response: responseContent
             };
 
-            // For Claude models (Legacy path kept just in case, though we fallback above now)
-            // if (isClaudeModel && block.tool_use_id) { ... }
             functionResponse.id = block.tool_use_id;
 
             parts.push({ functionResponse });
 
-            // Add any images from the tool result as separate parts
+            // Add any images from tool result as separate parts
             parts.push(...imageParts);
         } else if (block.type === 'thinking') {
             // Handle thinking blocks - only those with valid signatures
